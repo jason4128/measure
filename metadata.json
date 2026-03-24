@@ -1,0 +1,5 @@
+{
+  "name": "Image Measure Tool",
+  "description": "Upload images with known dimensions to measure lengths and areas accurately.",
+  "requestFramePermissions": []
+}
