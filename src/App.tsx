@@ -76,6 +76,7 @@ export default function App() {
 
   const stageRef = useRef<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const projectInputRef = useRef<HTMLInputElement>(null);
 
   // Handle image upload
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -299,6 +300,46 @@ export default function App() {
     document.body.removeChild(link);
   };
 
+  const saveProject = () => {
+    if (!imageSrc) return;
+    const projectData = {
+      imageSrc,
+      scale,
+      measurements,
+      stageScale,
+      stagePos,
+      version: '1.0'
+    };
+    const blob = new Blob([JSON.stringify(projectData)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `測量專案_${new Date().toLocaleDateString()}.meas`);
+    link.click();
+  };
+
+  const loadProject = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const data = JSON.parse(reader.result as string);
+          setImageSrc(data.imageSrc);
+          setScale(data.scale);
+          setMeasurements(data.measurements);
+          setStageScale(data.stageScale || 1);
+          setStagePos(data.stagePos || { x: 0, y: 0 });
+          setSelectedIds([]);
+          setTool('select');
+        } catch (err) {
+          alert('讀取專案檔案失敗，請確保檔案格式正確。');
+        }
+      };
+      reader.readAsText(file);
+    }
+  };
+
   const getTotals = () => {
     const selectedItems = measurements.filter(m => selectedIds.includes(m.id));
     if (selectedItems.length === 0) return null;
@@ -398,6 +439,35 @@ export default function App() {
               <li><b>面積工具</b>：點擊多個點，點擊第一點閉合。</li>
               <li>滾輪縮放，<b>選取工具</b> 拖拽平移。</li>
             </ul>
+          </section>
+
+          {/* Project Management */}
+          <section>
+            <h2 className="text-[11px] font-serif italic opacity-50 uppercase tracking-wider mb-3">專案管理</h2>
+            <div className="grid grid-cols-2 gap-2">
+              <button 
+                onClick={saveProject}
+                disabled={!imageSrc}
+                className="flex flex-col items-center justify-center gap-2 p-3 border border-[#141414] bg-white/40 hover:bg-white/80 transition-all disabled:opacity-20 disabled:cursor-not-allowed"
+              >
+                <Download size={16} />
+                <span className="text-[10px] uppercase tracking-widest font-bold">儲存專案</span>
+              </button>
+              <button 
+                onClick={() => projectInputRef.current?.click()}
+                className="flex flex-col items-center justify-center gap-2 p-3 border border-[#141414] bg-white/40 hover:bg-white/80 transition-all"
+              >
+                <History size={16} />
+                <span className="text-[10px] uppercase tracking-widest font-bold">開啟專案</span>
+              </button>
+              <input 
+                type="file" 
+                ref={projectInputRef} 
+                className="hidden" 
+                accept=".meas" 
+                onChange={loadProject} 
+              />
+            </div>
           </section>
 
           {/* Measurements List */}
