@@ -4,22 +4,29 @@ import path from 'path';
 import {defineConfig, loadEnv} from 'vite';
 
 export default defineConfig(({mode}) => {
+  // 載入環境變數
   const env = loadEnv(mode, '.', '');
+  
   return {
-    // 關鍵修正：確保靜態資源路徑正確指向 GitHub Pages 的子目錄
-    base: '/measure/', 
+    // 關鍵修正：必須與您的 GitHub Repository 名稱「upa」一致
+    base: '/upa/', 
+    
     plugins: [react(), tailwindcss()],
+    
     define: {
+      // 確保編譯時能注入 API Key
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
     },
+    
     resolve: {
       alias: {
+        // 設定路徑別名
         '@': path.resolve(__dirname, '.'),
       },
     },
+    
     server: {
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modify—file watching is disabled to prevent flickering during agent edits.
+      // AI Studio 環境專用設定，保持原樣即可
       hmr: process.env.DISABLE_HMR !== 'true',
     },
   };
