@@ -66,6 +66,7 @@ export default function App() {
   const [stageScale, setStageScale] = useState(1);
   const [stagePos, setStagePos] = useState({ x: 0, y: 0 });
   const [showScaleModal, setShowScaleModal] = useState(false);
+  const [showHelpModal, setShowHelpModal] = useState(false);
   const [tempPixelDist, setTempPixelDist] = useState(0);
   const [scaleInput, setScaleInput] = useState({ value: '', unit: 'm' });
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -456,19 +457,15 @@ export default function App() {
             </section>
           )}
 
-          {/* Help Section */}
-          <section className="p-3 border border-dashed border-[#141414]/30 rounded-sm">
-            <h2 className="text-[10px] font-mono uppercase tracking-tighter opacity-50 mb-2 flex items-center gap-1">
-              <Info size={10} /> 使用說明
-            </h2>
-            <ul className="text-[10px] space-y-1 opacity-60 list-disc pl-3">
-              <li>先上傳一張圖片。</li>
-              <li>使用 <b>設定比例</b> 在已知尺寸上畫一條線。</li>
-              <li>比例設定後，即可使用 <b>長度</b> 或 <b>面積</b> 工具。</li>
-              <li><b>長度工具</b>：點擊多個點，點擊最後一點完成。</li>
-              <li><b>面積工具</b>：點擊多個點，點擊第一點閉合。</li>
-              <li>滾輪縮放，<b>選取工具</b> 拖拽平移。</li>
-            </ul>
+          {/* Help Button */}
+          <section>
+            <button 
+              onClick={() => setShowHelpModal(true)}
+              className="w-full p-3 border border-[#141414] bg-white/40 hover:bg-white/80 transition-all flex items-center justify-center gap-2"
+            >
+              <Info size={16} />
+              <span className="text-[10px] uppercase tracking-widest font-bold">使用說明</span>
+            </button>
           </section>
 
           {/* Project Management */}
@@ -943,6 +940,62 @@ export default function App() {
                   </button>
                 </div>
               </div>
+            </motion.div>
+          </div>
+        )}
+
+        {showHelpModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#141414]/40 backdrop-blur-sm p-4">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-[#E4E3E0] border border-[#141414] p-8 max-w-md w-full shadow-2xl relative"
+            >
+              <button 
+                onClick={() => setShowHelpModal(false)}
+                className="absolute top-4 right-4 text-[#141414] hover:opacity-50"
+              >
+                <X size={20} />
+              </button>
+              
+              <h3 className="text-xl font-serif italic mb-6 flex items-center gap-2">
+                <Info size={20} /> 使用說明
+              </h3>
+              
+              <div className="space-y-4 text-sm leading-relaxed">
+                <div className="flex gap-3">
+                  <div className="w-6 h-6 rounded-full bg-[#141414] text-[#E4E3E0] flex items-center justify-center text-[10px] font-bold shrink-0">1</div>
+                  <p><b>上傳圖片</b>：點擊左下角按鈕上傳建築圖面或地圖。</p>
+                </div>
+                <div className="flex gap-3">
+                  <div className="w-6 h-6 rounded-full bg-[#141414] text-[#E4E3E0] flex items-center justify-center text-[10px] font-bold shrink-0">2</div>
+                  <p><b>設定比例</b>：在圖面上找一個已知長度的物件（如比例尺或門寬），畫一條線並輸入實際數值。</p>
+                </div>
+                <div className="flex gap-3">
+                  <div className="w-6 h-6 rounded-full bg-[#141414] text-[#E4E3E0] flex items-center justify-center text-[10px] font-bold shrink-0">3</div>
+                  <p><b>開始測量</b>：比例設定完成後，即可使用長度或面積工具進行測量。</p>
+                </div>
+                <div className="flex gap-3">
+                  <div className="w-6 h-6 rounded-full bg-[#141414] text-[#E4E3E0] flex items-center justify-center text-[10px] font-bold shrink-0">4</div>
+                  <div className="flex-1">
+                    <p><b>操作技巧</b>：</p>
+                    <ul className="list-disc pl-4 mt-1 space-y-1 opacity-80">
+                      <li><b>滾輪</b>：縮放畫布。</li>
+                      <li><b>選取工具</b>：拖拽平移畫布，或點擊測量項目進行編輯。</li>
+                      <li><b>長度測量</b>：點擊多點，點擊最後一點或「完成」按鈕結束。</li>
+                      <li><b>面積測量</b>：點擊多點，點擊第一點閉合或「完成」按鈕結束。</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+
+              <button 
+                onClick={() => setShowHelpModal(false)}
+                className="w-full mt-8 py-3 bg-[#141414] text-[#E4E3E0] text-xs uppercase tracking-widest font-bold hover:opacity-90 transition-all"
+              >
+                我知道了
+              </button>
             </motion.div>
           </div>
         )}
