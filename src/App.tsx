@@ -71,6 +71,8 @@ export default function App() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState('');
+  const [lengthColor, setLengthColor] = useState('#3b82f6');
+  const [areaColor, setAreaColor] = useState('#10b981');
 
   const [previewPoint, setPreviewPoint] = useState<Point | null>(null);
 
@@ -163,7 +165,7 @@ export default function App() {
         value: realDist,
         unit: scale.unit,
         label: `長度測量 ${measurements.length + 1}`,
-        color: '#3b82f6'
+        color: lengthColor
       };
       setMeasurements([...measurements, newMeasurement]);
     } else if (tool === 'area') {
@@ -177,7 +179,7 @@ export default function App() {
         value: realArea,
         unit: `${scale.unit}²`,
         label: `面積測量 ${measurements.length + 1}`,
-        color: '#10b981'
+        color: areaColor
       };
       setMeasurements([...measurements, newMeasurement]);
     }
@@ -257,6 +259,12 @@ export default function App() {
       ));
       setEditingId(null);
     }
+  };
+
+  const updateMeasurementColor = (id: string, color: string) => {
+    setMeasurements(measurements.map(m => 
+      m.id === id ? { ...m, color } : m
+    ));
   };
 
   const getPingValue = (value: number, unit: string) => {
@@ -390,28 +398,50 @@ export default function App() {
                 label="設定比例" 
                 disabled={!imageSrc}
               />
-              <ToolButton 
-                active={tool === 'length'} 
-                onClick={() => {
-                  setTool('length');
-                  setCurrentPoints([]);
-                  setIsDrawing(false);
-                }} 
-                icon={<Ruler size={18} />} 
-                label="長度測量" 
-                disabled={!scale}
-              />
-              <ToolButton 
-                active={tool === 'area'} 
-                onClick={() => {
-                  setTool('area');
-                  setCurrentPoints([]);
-                  setIsDrawing(false);
-                }} 
-                icon={<Square size={18} />} 
-                label="面積測量" 
-                disabled={!scale}
-              />
+              <div className="relative group">
+                <ToolButton 
+                  active={tool === 'length'} 
+                  onClick={() => {
+                    setTool('length');
+                    setCurrentPoints([]);
+                    setIsDrawing(false);
+                  }} 
+                  icon={<Ruler size={18} />} 
+                  label="長度測量" 
+                  disabled={!scale}
+                />
+                {!(!scale) && (
+                  <input 
+                    type="color" 
+                    value={lengthColor} 
+                    onChange={(e) => setLengthColor(e.target.value)}
+                    className="absolute top-1 right-1 w-4 h-4 p-0 border-none bg-transparent cursor-pointer"
+                    title="設定預設長度顏色"
+                  />
+                )}
+              </div>
+              <div className="relative group">
+                <ToolButton 
+                  active={tool === 'area'} 
+                  onClick={() => {
+                    setTool('area');
+                    setCurrentPoints([]);
+                    setIsDrawing(false);
+                  }} 
+                  icon={<Square size={18} />} 
+                  label="面積測量" 
+                  disabled={!scale}
+                />
+                {!(!scale) && (
+                  <input 
+                    type="color" 
+                    value={areaColor} 
+                    onChange={(e) => setAreaColor(e.target.value)}
+                    className="absolute top-1 right-1 w-4 h-4 p-0 border-none bg-transparent cursor-pointer"
+                    title="設定預設面積顏色"
+                  />
+                )}
+              </div>
             </div>
           </section>
 
@@ -578,7 +608,16 @@ export default function App() {
                   >
                     <div className="flex justify-between items-start mb-1">
                       <div className="flex items-center gap-2">
-                        <div className={`w-2 h-2 rounded-full ${selectedIds.includes(m.id) ? 'bg-white' : ''}`} style={{ backgroundColor: selectedIds.includes(m.id) ? undefined : m.color }}></div>
+                        <input 
+                          type="color" 
+                          value={m.color} 
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            updateMeasurementColor(m.id, e.target.value);
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          className="w-4 h-4 p-0 border-none bg-transparent cursor-pointer rounded-full overflow-hidden"
+                        />
                         <span className="text-[10px] font-mono uppercase tracking-tighter opacity-70">
                           {m.type === 'length' ? '長度' : '面積'}
                         </span>
