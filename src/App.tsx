@@ -543,8 +543,8 @@ export default function App() {
     if (!currentPage || !image) return;
 
     // 檢查金鑰
-    if (!hasApiKey && !process.env.GEMINI_API_KEY) {
-      await handleSelectKey();
+    if (!hasApiKey && !process.env.GEMINI_API_KEY && !customApiKey) {
+      setShowApiKeyInput(true);
       return;
     }
 
@@ -563,8 +563,8 @@ export default function App() {
       const prompt = `這是一張建築平面圖。請識別圖中所有的房間或封閉區域。
       請以 JSON 格式返回一個數組，每個對象包含：
       - "label": 房間名稱 (例如：客廳, 臥室, 廚房)
-      - "polygon": 房間邊界的頂點坐標數組，格式為 [[y1, x1], [y2, x2], ...]。坐標應為歸一化坐標 (0-1000)。
-      請盡可能精確地勾勒出每個房間的輪廓。`;
+      - "bbox": 房間的矩形邊界框，格式為 [ymin, xmin, ymax, xmax]。坐標應為歸一化坐標 (0-1000)。
+      請確保返回的是矩形區域，以便用戶後續調整。`;
 
       const response = await aiInstance.models.generateContent({
         model: "gemini-3-flash-preview",
@@ -584,15 +584,13 @@ export default function App() {
               type: Type.OBJECT,
               properties: {
                 label: { type: Type.STRING },
-                polygon: { 
+                bbox: { 
                   type: Type.ARRAY, 
-                  items: { 
-                    type: Type.ARRAY, 
-                    items: { type: Type.NUMBER } 
-                  } 
+                  items: { type: Type.NUMBER },
+                  description: "[ymin, xmin, ymax, xmax]"
                 }
               },
-              required: ["label", "polygon"]
+              required: ["label", "bbox"]
             }
           }
         }
@@ -605,10 +603,15 @@ export default function App() {
       const imgHeight = image.height;
 
       const newMeasurements: Measurement[] = detectedRooms.map((room: any) => {
-        const points = room.polygon.map((p: number[]) => ({
-          x: (p[1] / 1000) * imgWidth,
-          y: (p[0] / 1000) * imgHeight
-        }));
+        const [ymin, xmin, ymax, xmax] = room.bbox;
+        
+        // 轉換為矩形的 4 個頂點
+        const points = [
+          { x: (xmin / 1000) * imgWidth, y: (ymin / 1000) * imgHeight }, // Top-left
+          { x: (xmax / 1000) * imgWidth, y: (ymin / 1000) * imgHeight }, // Top-right
+          { x: (xmax / 1000) * imgWidth, y: (ymax / 1000) * imgHeight }, // Bottom-right
+          { x: (xmin / 1000) * imgWidth, y: (ymax / 1000) * imgHeight }  // Bottom-left
+        ];
 
         let value = 0;
         let unit = 'px²';
@@ -625,7 +628,8 @@ export default function App() {
           value,
           unit,
           label: `AI 偵測: ${room.label}`,
-          color: areaColor
+          color: areaColor,
+          isRect: true // 強制設為矩形模式
         };
       });
 
