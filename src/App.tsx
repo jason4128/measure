@@ -113,6 +113,9 @@ export default function App() {
   const [image] = useImage(currentPage?.imageSrc || '');
 
   const stageRef = useRef<any>(null);
+  const dragStartPoints = useRef<Point[] | null>(null);
+  const dragStartPointer = useRef<Point | null>(null);
+  const lastPointerPos = useRef<Point | null>(null); // 保留用於其他可能的增量需求
   const fileInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
 
@@ -612,9 +615,16 @@ export default function App() {
   };
 
   const handlePointDragMove = useCallback((measurementId: string, pointIndex: number, e: any) => {
+    e.cancelBubble = true; // 阻止事件冒泡到畫布
     const stage = e.target.getStage();
     const point = stage.getRelativePointerPosition();
     
+    if (!point) return;
+
+    // 同步節點座標，防止雙重位移
+    e.target.x(point.x);
+    e.target.y(point.y);
+
     updateCurrentPage(prevPage => {
       if (!prevPage.scale) return {};
       
@@ -654,6 +664,50 @@ export default function App() {
         return m;
       });
       
+      return { measurements: newMeasurements };
+    });
+  }, [updateCurrentPage]);
+
+  const handleMeasurementDragStart = (measurementId: string, e: any) => {
+    e.cancelBubble = true; // 阻止事件冒泡到畫布
+    const stage = e.target.getStage();
+    const pos = stage.getRelativePointerPosition();
+    dragStartPointer.current = pos;
+
+    // 找到當前拖拽的測量對象並記錄其初始頂點
+    const measurement = currentPage.measurements.find(m => m.id === measurementId);
+    if (measurement) {
+      dragStartPoints.current = [...measurement.points];
+    }
+  };
+
+  const handleMeasurementDragMove = useCallback((measurementId: string, e: any) => {
+    e.cancelBubble = true; // 阻止事件冒泡到畫布
+    const stage = e.target.getStage();
+    const currentPointerPos = stage.getRelativePointerPosition();
+    
+    if (!dragStartPointer.current || !currentPointerPos || !dragStartPoints.current) return;
+
+    // 計算滑鼠相對於「拖拽起點」的總位移
+    const dx = currentPointerPos.x - dragStartPointer.current.x;
+    const dy = currentPointerPos.y - dragStartPointer.current.y;
+
+    // 重置 Konva 節點的本地座標，因為我們是直接更新 state 中的 points
+    e.target.x(0);
+    e.target.y(0);
+
+    updateCurrentPage(prevPage => {
+      const newMeasurements = prevPage.measurements.map(m => {
+        if (m.id === measurementId) {
+          // 基於初始頂點座標加上總位移，確保絕對精確
+          const newPoints = dragStartPoints.current!.map(p => ({
+            x: p.x + dx,
+            y: p.y + dy
+          }));
+          return { ...m, points: newPoints };
+        }
+        return m;
+      });
       return { measurements: newMeasurements };
     });
   }, [updateCurrentPage]);
@@ -1144,6 +1198,19 @@ export default function App() {
                           points={m.points.flatMap(p => [p.x, p.y])}
                           stroke={selectedIds.includes(m.id) ? '#141414' : m.color}
                           strokeWidth={(selectedIds.includes(m.id) ? 3 : 2) / currentPage.stageScale}
+                          draggable={selectedIds.includes(m.id) && tool === 'select'}
+                          onDragStart={(e) => handleMeasurementDragStart(m.id, e)}
+                          onDragMove={(e) => handleMeasurementDragMove(m.id, e)}
+                          onMouseEnter={(e) => {
+                            if (selectedIds.includes(m.id) && tool === 'select') {
+                              const container = e.target.getStage().container();
+                              container.style.cursor = 'move';
+                            }
+                          }}
+                          onMouseLeave={(e) => {
+                            const container = e.target.getStage().container();
+                            container.style.cursor = tool === 'select' ? 'default' : 'crosshair';
+                          }}
                         />
                         {m.points.map((p, i) => (
                           <Circle 
@@ -1159,7 +1226,12 @@ export default function App() {
                             onMouseEnter={(e) => {
                               if (selectedIds.includes(m.id) && tool === 'select') {
                                 const container = e.target.getStage().container();
-                                container.style.cursor = 'move';
+                                if (m.isRect) {
+                                  const cursors = ['nw-resize', 'ne-resize', 'se-resize', 'sw-resize'];
+                                  container.style.cursor = cursors[i] || 'move';
+                                } else {
+                                  container.style.cursor = 'move';
+                                }
                               }
                             }}
                             onMouseLeave={(e) => {
@@ -1187,6 +1259,19 @@ export default function App() {
                           strokeWidth={(selectedIds.includes(m.id) ? 3 : 2) / currentPage.stageScale}
                           fill={m.color + (selectedIds.includes(m.id) ? '66' : '33')}
                           closed
+                          draggable={selectedIds.includes(m.id) && tool === 'select'}
+                          onDragStart={(e) => handleMeasurementDragStart(m.id, e)}
+                          onDragMove={(e) => handleMeasurementDragMove(m.id, e)}
+                          onMouseEnter={(e) => {
+                            if (selectedIds.includes(m.id) && tool === 'select') {
+                              const container = e.target.getStage().container();
+                              container.style.cursor = 'move';
+                            }
+                          }}
+                          onMouseLeave={(e) => {
+                            const container = e.target.getStage().container();
+                            container.style.cursor = tool === 'select' ? 'default' : 'crosshair';
+                          }}
                         />
                         {m.points.map((p, i) => (
                           <Circle 
@@ -1202,7 +1287,12 @@ export default function App() {
                             onMouseEnter={(e) => {
                               if (selectedIds.includes(m.id) && tool === 'select') {
                                 const container = e.target.getStage().container();
-                                container.style.cursor = 'move';
+                                if (m.isRect) {
+                                  const cursors = ['nw-resize', 'ne-resize', 'se-resize', 'sw-resize'];
+                                  container.style.cursor = cursors[i] || 'move';
+                                } else {
+                                  container.style.cursor = 'move';
+                                }
                               }
                             }}
                             onMouseLeave={(e) => {
