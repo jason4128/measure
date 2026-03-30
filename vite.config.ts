@@ -8,8 +8,7 @@ export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
   
   return {
-    // 修正：必須與您的 GitHub Repository 名稱「measure」一致
-    base: '/measure/', 
+    // base: '/measure/', 
     
     plugins: [react(), tailwindcss()],
     

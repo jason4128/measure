@@ -98,6 +98,8 @@ export default function App() {
   const [tempPixelDist, setTempPixelDist] = useState(0);
   const [scaleInput, setScaleInput] = useState({ value: '', unit: 'm' });
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [detectRoom, setDetectRoom] = useState(true);
+  const [detectCorridor, setDetectCorridor] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState('');
   const [editHeight, setEditHeight] = useState('');
@@ -565,7 +567,7 @@ export default function App() {
   const downloadCSV = () => {
     if (!currentPage || currentPage.measurements.length === 0) return;
     
-    const headers = ['名稱', '類型', '數值', '單位', '坪數', '周長', '高度', '牆面積'];
+    const headers = ['名稱', '類型', '數值', '單位', '坪數 (面積)', '周長', '高度', '牆面積', '牆面積 (坪)'];
     const rows = currentPage.measurements.map(m => [
       m.label,
       m.type === 'length' ? '長度' : '面積',
@@ -574,7 +576,8 @@ export default function App() {
       m.type === 'area' ? getPingValue(m.value, m.unit) || '-' : '-',
       m.perimeter ? m.perimeter.toFixed(2) : '-',
       m.height ? m.height.toFixed(2) : '-',
-      m.wallArea ? m.wallArea.toFixed(2) : '-'
+      m.wallArea ? m.wallArea.toFixed(2) : '-',
+      m.wallArea ? getPingValue(m.wallArea, m.unit) || '-' : '-'
     ]);
     
     const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
@@ -657,12 +660,22 @@ export default function App() {
         throw new Error('API Key is missing. Please provide a valid API key.');
       }
 
+      if (!detectRoom && !detectCorridor) {
+        alert('請至少勾選房間或走廊其中一項。');
+        setIsAiProcessing(false);
+        return;
+      }
+
       const aiInstance = new GoogleGenAI({ apiKey });
       
       const base64Data = currentPage.imageSrc.split(',')[1];
-      const prompt = `這是一張建築平面圖。請識別圖中所有的房間、封閉區域以及走廊 (Corridors)。
+      const targetTypes = [];
+      if (detectRoom) targetTypes.push("房間 (Rooms)");
+      if (detectCorridor) targetTypes.push("走廊 (Corridors)");
+      
+      const prompt = `這是一張建築平面圖。請識別圖中所有的 ${targetTypes.join('、')}。
       請以 JSON 格式返回一個數組，每個對象包含：
-      - "label": 房間或區域名稱 (例如：客廳, 臥室, 廚房, 走廊)
+      - "label": 區域名稱 (例如：客廳, 臥室, 廚房, 走廊)
       - "bbox": 區域的矩形邊界框，格式為 [ymin, xmin, ymax, xmax]。坐標應為歸一化坐標 (0-1000)。
       請確保返回的是矩形區域，以便用戶後續調整。`;
 
@@ -1122,6 +1135,16 @@ export default function App() {
               )}
             </AnimatePresence>
 
+            <div className="flex gap-2 mb-3">
+              <label className="flex items-center gap-1 text-[10px] cursor-pointer">
+                <input type="checkbox" checked={detectRoom} onChange={(e) => setDetectRoom(e.target.checked)} />
+                房間
+              </label>
+              <label className="flex items-center gap-1 text-[10px] cursor-pointer">
+                <input type="checkbox" checked={detectCorridor} onChange={(e) => setDetectCorridor(e.target.checked)} />
+                走廊
+              </label>
+            </div>
             {!hasApiKey && !process.env.GEMINI_API_KEY && !customApiKey ? (
               <button 
                 onClick={() => setShowApiKeyInput(true)}
@@ -1320,8 +1343,8 @@ export default function App() {
               <div className="mb-4 p-3 bg-[#141414] text-[#E4E3E0] rounded-sm shadow-inner">
                 <h3 className="text-[10px] uppercase tracking-widest opacity-50 mb-2">選取統計</h3>
                 <div className="space-y-2">
-                  {totals.map((t, i) => (
-                    <div key={i} className="flex flex-col border-b border-white/10 pb-2 last:border-0">
+                  {totals.map((t) => (
+                    <div key={`${t.type}-${t.unit}`} className="flex flex-col border-b border-white/10 pb-2 last:border-0">
                       <div className="flex justify-between items-end">
                         <span className="text-[10px] opacity-70">{t.type === 'length' ? '總長度' : '總面積'}</span>
                         <div className="text-right">
@@ -1671,7 +1694,7 @@ export default function App() {
                           closed={false}
                         />
                         {currentPoints.map((p, i) => (
-                          <Circle key={i} x={p.x} y={p.y} radius={4 / currentPage.stageScale} fill="#ef4444" />
+                          <Circle key={`drawing-point-${i}`} x={p.x} y={p.y} radius={4 / currentPage.stageScale} fill="#ef4444" />
                         ))}
                       </>
                     ) : tool === 'rect' ? (
