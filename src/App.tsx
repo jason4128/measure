@@ -32,6 +32,15 @@ import { Tool, Point, Measurement, Scale, ProjectPage } from './types';
 import { GoogleGenAI, Type } from "@google/genai";
 import * as pdfjs from 'pdfjs-dist';
 
+declare global {
+  interface Window {
+    aistudio: {
+      hasSelectedApiKey: () => Promise<boolean>;
+      openSelectKey: () => Promise<void>;
+    };
+  }
+}
+
 // Set up PDF.js worker
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.mjs',
@@ -63,6 +72,15 @@ const getPolygonArea = (points: Point[]) => {
   return Math.abs(area) / 2;
 };
 
+const getPolygonPerimeter = (points: Point[]) => {
+  let perimeter = 0;
+  for (let i = 0; i < points.length; i++) {
+    const j = (i + 1) % points.length;
+    perimeter += Math.sqrt(Math.pow(points[j].x - points[i].x, 2) + Math.pow(points[j].y - points[i].y, 2));
+  }
+  return perimeter;
+};
+
 // 1 Ping = 3.305785 m2
 const M2_TO_PING = 0.3025;
 
@@ -82,6 +100,7 @@ export default function App() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState('');
+  const [editHeight, setEditHeight] = useState('');
   const [lengthColor, setLengthColor] = useState('#3b82f6');
   const [areaColor, setAreaColor] = useState('#10b981');
   const [previewPoint, setPreviewPoint] = useState<Point | null>(null);
@@ -89,6 +108,8 @@ export default function App() {
   const [hasApiKey, setHasApiKey] = useState(false);
   const [customApiKey, setCustomApiKey] = useState(() => localStorage.getItem('GEMINI_CUSTOM_API_KEY') || '');
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
+  const [globalHeight, setGlobalHeight] = useState<string>('2.8'); // Default global height
+  const [isEditingScale, setIsEditingScale] = useState(false);
   const [confirmModal, setConfirmModal] = useState<{
     show: boolean;
     title: string;
@@ -346,12 +367,15 @@ export default function App() {
     } else if (tool === 'area' || tool === 'rect') {
       if (pointsToUse.length < 3) return;
       const pixelArea = getPolygonArea(pointsToUse);
+      const pixelPerimeter = getPolygonPerimeter(pointsToUse);
       const realArea = pixelArea * Math.pow(scale.realDistance / scale.pixelDistance, 2);
+      const realPerimeter = pixelPerimeter * (scale.realDistance / scale.pixelDistance);
       const newMeasurement: Measurement = {
         id: generateId(),
         type: 'area',
         points: pointsToUse,
         value: realArea,
+        perimeter: realPerimeter,
         unit: `${scale.unit}²`,
         label: `${tool === 'rect' ? '矩形' : '面積'}測量 ${measurements.length + 1}`,
         color: areaColor,
@@ -398,14 +422,25 @@ export default function App() {
   const saveScale = () => {
     const realDist = parseFloat(scaleInput.value);
     if (!isNaN(realDist) && realDist > 0) {
-      updateCurrentPage({
-        scale: {
-          pixelDistance: tempPixelDist,
-          realDistance: realDist,
-          unit: scaleInput.unit
-        }
-      });
+      const newScale = {
+        pixelDistance: tempPixelDist,
+        realDistance: realDist,
+        unit: scaleInput.unit
+      };
+
+      if (isEditingScale) {
+        setPages(prevPages => prevPages.map(p => {
+          if (p.id === currentPageId) {
+            return recalculatePageMeasurements(p, newScale);
+          }
+          return p;
+        }));
+      } else {
+        updateCurrentPage({ scale: newScale });
+      }
+
       setShowScaleModal(false);
+      setIsEditingScale(false);
       setTool('select');
       setCurrentPoints([]);
     }
@@ -430,25 +465,52 @@ export default function App() {
   const startEditing = (m: Measurement) => {
     setEditingId(m.id);
     setEditLabel(m.label);
+    setEditHeight(m.height?.toString() || '');
+  };
+
+  const updateMeasurementColor = (id: string, color: string) => {
+    updateCurrentPage({
+      measurements: currentPage.measurements.map(m => 
+        m.id === id ? { ...m, color } : m
+      )
+    });
   };
 
   const saveEdit = () => {
     if (editingId && currentPage) {
+      const heightVal = parseFloat(editHeight);
       updateCurrentPage({
-        measurements: currentPage.measurements.map(m => 
-          m.id === editingId ? { ...m, label: editLabel } : m
-        )
+        measurements: currentPage.measurements.map(m => {
+          if (m.id === editingId) {
+            const updated = { ...m, label: editLabel, height: isNaN(heightVal) ? undefined : heightVal };
+            if (updated.type === 'area' && updated.perimeter && updated.height) {
+              updated.wallArea = updated.perimeter * updated.height;
+            }
+            return updated;
+          }
+          return m;
+        })
       });
       setEditingId(null);
     }
   };
 
-  const updateMeasurementColor = (id: string, color: string) => {
-    if (!currentPage) return;
+  const applyGlobalHeight = (heightStr: string) => {
+    const h = parseFloat(heightStr);
+    setGlobalHeight(heightStr);
+    if (!currentPage || isNaN(h)) return;
+
     updateCurrentPage({
-      measurements: currentPage.measurements.map(m => 
-        m.id === id ? { ...m, color } : m
-      )
+      measurements: currentPage.measurements.map(m => {
+        if (m.type === 'area') {
+          const updated = { ...m, height: h };
+          if (updated.perimeter) {
+            updated.wallArea = updated.perimeter * h;
+          }
+          return updated;
+        }
+        return m;
+      })
     });
   };
 
@@ -465,16 +527,54 @@ export default function App() {
     return (m2Value * M2_TO_PING).toFixed(2);
   };
 
+  const recalculatePageMeasurements = (page: ProjectPage, newScale: Scale): ProjectPage => {
+    const { pixelDistance, realDistance, unit } = newScale;
+    const scaleFactor = realDistance / pixelDistance;
+    const areaScaleFactor = Math.pow(scaleFactor, 2);
+
+    return {
+      ...page,
+      scale: newScale,
+      measurements: page.measurements.map(m => {
+        if (m.type === 'length') {
+          const pixelDist = getPathLength(m.points);
+          return {
+            ...m,
+            value: pixelDist * scaleFactor,
+            unit: unit
+          };
+        } else if (m.type === 'area') {
+          const pixelArea = getPolygonArea(m.points);
+          const pixelPerimeter = getPolygonPerimeter(m.points);
+          const realArea = pixelArea * areaScaleFactor;
+          const realPerimeter = pixelPerimeter * scaleFactor;
+          const wallArea = m.height ? realPerimeter * m.height : undefined;
+          return {
+            ...m,
+            value: realArea,
+            perimeter: realPerimeter,
+            wallArea: wallArea,
+            unit: `${unit}²`
+          };
+        }
+        return m;
+      })
+    };
+  };
+
   const downloadCSV = () => {
     if (!currentPage || currentPage.measurements.length === 0) return;
     
-    const headers = ['名稱', '類型', '數值', '單位', '坪數'];
+    const headers = ['名稱', '類型', '數值', '單位', '坪數', '周長', '高度', '牆面積'];
     const rows = currentPage.measurements.map(m => [
       m.label,
       m.type === 'length' ? '長度' : '面積',
       m.value.toFixed(2),
       m.unit,
-      m.type === 'area' ? getPingValue(m.value, m.unit) || '-' : '-'
+      m.type === 'area' ? getPingValue(m.value, m.unit) || '-' : '-',
+      m.perimeter ? m.perimeter.toFixed(2) : '-',
+      m.height ? m.height.toFixed(2) : '-',
+      m.wallArea ? m.wallArea.toFixed(2) : '-'
     ]);
     
     const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
@@ -560,10 +660,10 @@ export default function App() {
       const aiInstance = new GoogleGenAI({ apiKey });
       
       const base64Data = currentPage.imageSrc.split(',')[1];
-      const prompt = `這是一張建築平面圖。請識別圖中所有的房間或封閉區域。
+      const prompt = `這是一張建築平面圖。請識別圖中所有的房間、封閉區域以及走廊 (Corridors)。
       請以 JSON 格式返回一個數組，每個對象包含：
-      - "label": 房間名稱 (例如：客廳, 臥室, 廚房)
-      - "bbox": 房間的矩形邊界框，格式為 [ymin, xmin, ymax, xmax]。坐標應為歸一化坐標 (0-1000)。
+      - "label": 房間或區域名稱 (例如：客廳, 臥室, 廚房, 走廊)
+      - "bbox": 區域的矩形邊界框，格式為 [ymin, xmin, ymax, xmax]。坐標應為歸一化坐標 (0-1000)。
       請確保返回的是矩形區域，以便用戶後續調整。`;
 
       const response = await aiInstance.models.generateContent({
@@ -614,22 +714,31 @@ export default function App() {
         ];
 
         let value = 0;
+        let perimeter = 0;
         let unit = 'px²';
         if (currentPage.scale) {
           const pixelArea = getPolygonArea(points);
+          const pixelPerimeter = getPolygonPerimeter(points);
           value = pixelArea * Math.pow(currentPage.scale.realDistance / currentPage.scale.pixelDistance, 2);
+          perimeter = pixelPerimeter * (currentPage.scale.realDistance / currentPage.scale.pixelDistance);
           unit = `${currentPage.scale.unit}²`;
         }
+
+        const isCorridor = room.label.includes('走廊') || room.label.toLowerCase().includes('corridor');
+        const h = parseFloat(globalHeight);
 
         return {
           id: generateId(),
           type: 'area',
           points,
           value,
+          perimeter,
           unit,
-          label: `AI 偵測: ${room.label}`,
-          color: areaColor,
-          isRect: true // 強制設為矩形模式
+          label: room.label.replace(/^AI 偵測: /, ''), // 移除 "AI 偵測: " 前綴
+          color: isCorridor ? '#f59e0b' : areaColor, // 區分走廊與房間顏色
+          isRect: true,
+          height: isNaN(h) ? undefined : h,
+          wallArea: (!isNaN(h) && perimeter) ? perimeter * h : undefined
         };
       });
 
@@ -651,14 +760,17 @@ export default function App() {
     const selectedItems = currentPage.measurements.filter(m => selectedIds.includes(m.id));
     if (selectedItems.length === 0) return null;
 
-    const totals: { [key: string]: { value: number, unit: string, type: string } } = {};
+    const totals: { [key: string]: { value: number, unit: string, type: string, wallArea: number } } = {};
     
     selectedItems.forEach(m => {
       const key = `${m.type}-${m.unit}`;
       if (!totals[key]) {
-        totals[key] = { value: 0, unit: m.unit, type: m.type };
+        totals[key] = { value: 0, unit: m.unit, type: m.type, wallArea: 0 };
       }
       totals[key].value += m.value;
+      if (m.wallArea) {
+        totals[key].wallArea += m.wallArea;
+      }
     });
 
     return Object.values(totals);
@@ -701,15 +813,23 @@ export default function App() {
           }
           
           let newValue = m.value;
+          let newPerimeter = m.perimeter;
+          let newWallArea = m.wallArea;
+
           if (m.type === 'length') {
             const pixelDist = getPathLength(newPoints);
             newValue = (pixelDist / prevPage.scale!.pixelDistance) * prevPage.scale!.realDistance;
           } else if (m.type === 'area') {
             const pixelArea = getPolygonArea(newPoints);
+            const pixelPerimeter = getPolygonPerimeter(newPoints);
             newValue = pixelArea * Math.pow(prevPage.scale!.realDistance / prevPage.scale!.pixelDistance, 2);
+            newPerimeter = pixelPerimeter * (prevPage.scale!.realDistance / prevPage.scale!.pixelDistance);
+            if (m.height) {
+              newWallArea = newPerimeter * m.height;
+            }
           }
           
-          return { ...m, points: newPoints, value: newValue };
+          return { ...m, points: newPoints, value: newValue, perimeter: newPerimeter, wallArea: newWallArea };
         }
         return m;
       });
@@ -754,7 +874,27 @@ export default function App() {
             x: p.x + dx,
             y: p.y + dy
           }));
-          return { ...m, points: newPoints };
+          
+          let newValue = m.value;
+          let newPerimeter = m.perimeter;
+          let newWallArea = m.wallArea;
+
+          if (prevPage.scale) {
+            if (m.type === 'length') {
+              const pixelDist = getPathLength(newPoints);
+              newValue = (pixelDist / prevPage.scale.pixelDistance) * prevPage.scale.realDistance;
+            } else if (m.type === 'area') {
+              const pixelArea = getPolygonArea(newPoints);
+              const pixelPerimeter = getPolygonPerimeter(newPoints);
+              newValue = pixelArea * Math.pow(prevPage.scale.realDistance / prevPage.scale.pixelDistance, 2);
+              newPerimeter = pixelPerimeter * (prevPage.scale.realDistance / prevPage.scale.pixelDistance);
+              if (m.height) {
+                newWallArea = newPerimeter * m.height;
+              }
+            }
+          }
+
+          return { ...m, points: newPoints, value: newValue, perimeter: newPerimeter, wallArea: newWallArea };
         }
         return m;
       });
@@ -769,7 +909,7 @@ export default function App() {
       {/* Sidebar */}
       <div className="w-80 border-r border-[#141414] flex flex-col bg-[#E4E3E0] z-10">
         <div className="p-6 border-bottom border-[#141414]">
-          <h1 className="text-2xl font-serif italic mb-2">影像測量工具</h1>
+          <h1 className="text-2xl font-serif italic mb-2">工程平面圖系統</h1>
           <p className="text-xs opacity-60 uppercase tracking-widest">專業影像測量與標註</p>
         </div>
 
@@ -911,6 +1051,29 @@ export default function App() {
             </div>
           </section>
 
+          {/* Global Settings */}
+          <section className="p-4 border border-[#141414] bg-white/40">
+            <h2 className="text-[11px] font-serif italic opacity-50 uppercase tracking-wider mb-3">全域設定</h2>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-[10px] uppercase tracking-widest font-bold">預設天花板高度</label>
+                <div className="flex items-center gap-1">
+                  <input 
+                    type="number"
+                    step="0.1"
+                    value={globalHeight}
+                    onChange={(e) => applyGlobalHeight(e.target.value)}
+                    className="w-16 bg-white border border-[#141414] px-2 py-1 text-xs font-mono focus:outline-none"
+                  />
+                  <span className="text-[10px] opacity-60">{currentPage?.scale?.unit || 'm'}</span>
+                </div>
+              </div>
+              <p className="text-[8px] opacity-40 leading-tight">
+                * 修改此處將同步更新所有測量項目的牆面積計算。
+              </p>
+            </div>
+          </section>
+
           {/* AI Tools */}
           <section>
             <div className="flex justify-between items-center mb-3">
@@ -994,7 +1157,24 @@ export default function App() {
           {/* Scale Info */}
           {currentPage?.scale && (
             <section className="p-3 border border-[#141414] rounded-sm bg-white/50">
-              <h2 className="text-[10px] font-mono uppercase tracking-tighter opacity-50 mb-1">目前比例尺</h2>
+              <div className="flex justify-between items-start mb-1">
+                <h2 className="text-[10px] font-mono uppercase tracking-tighter opacity-50">目前比例尺</h2>
+                <button 
+                  onClick={() => {
+                    setScaleInput({
+                      value: currentPage.scale!.realDistance.toString(),
+                      unit: currentPage.scale!.unit
+                    });
+                    setTempPixelDist(currentPage.scale!.pixelDistance);
+                    setIsEditingScale(true);
+                    setShowScaleModal(true);
+                  }}
+                  className="text-[10px] text-blue-600 hover:underline flex items-center gap-1"
+                >
+                  <Edit3 size={10} />
+                  修改單位
+                </button>
+              </div>
               <div className="flex justify-between items-end">
                 <span className="text-lg font-mono">{currentPage.scale.realDistance} {currentPage.scale.unit}</span>
                 <span className="text-[10px] opacity-50 font-mono">≈ {Math.round(currentPage.scale.pixelDistance)} 像素</span>
@@ -1141,18 +1321,30 @@ export default function App() {
                 <h3 className="text-[10px] uppercase tracking-widest opacity-50 mb-2">選取統計</h3>
                 <div className="space-y-2">
                   {totals.map((t, i) => (
-                    <div key={i} className="flex justify-between items-end border-b border-white/10 pb-1 last:border-0">
-                      <span className="text-[10px] opacity-70">{t.type === 'length' ? '總長度' : '總面積'}</span>
-                      <div className="text-right">
-                        <div className="text-sm font-mono font-bold">
-                          {t.value.toFixed(2)} <small className="text-[9px]">{t.unit}</small>
-                        </div>
-                        {t.type === 'area' && getPingValue(t.value, t.unit) && (
-                          <div className="text-[9px] opacity-60">
-                            ≈ {getPingValue(t.value, t.unit)} 坪
+                    <div key={i} className="flex flex-col border-b border-white/10 pb-2 last:border-0">
+                      <div className="flex justify-between items-end">
+                        <span className="text-[10px] opacity-70">{t.type === 'length' ? '總長度' : '總面積'}</span>
+                        <div className="text-right">
+                          <div className="text-sm font-mono font-bold">
+                            {t.value.toFixed(2)} <small className="text-[9px]">{t.unit}</small>
                           </div>
-                        )}
+                          {t.type === 'area' && getPingValue(t.value, t.unit) && (
+                            <div className="text-[9px] opacity-60">
+                              ≈ {getPingValue(t.value, t.unit)} 坪
+                            </div>
+                          )}
+                        </div>
                       </div>
+                      {t.type === 'area' && t.wallArea > 0 && (
+                        <div className="flex justify-between items-end mt-1">
+                          <span className="text-[10px] opacity-70">總牆面積</span>
+                          <div className="text-right">
+                            <div className="text-sm font-mono font-bold text-blue-400">
+                              {t.wallArea.toFixed(2)} <small className="text-[9px]">{t.unit}</small>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1203,20 +1395,55 @@ export default function App() {
                     </div>
                     
                     {editingId === m.id ? (
-                      <div className="flex gap-1 mt-1" onClick={e => e.stopPropagation()}>
-                        <input 
-                          value={editLabel}
-                          onChange={e => setEditLabel(e.target.value)}
-                          className="flex-1 bg-white text-[#141414] text-xs px-2 py-1 border border-[#141414]"
-                          autoFocus
-                        />
-                        <button onClick={saveEdit} className="p-1 bg-green-500 text-white">
-                          <Check size={14} />
-                        </button>
+                      <div className="space-y-2 mt-1" onClick={e => e.stopPropagation()}>
+                        <div className="flex gap-1">
+                          <input 
+                            value={editLabel}
+                            onChange={e => setEditLabel(e.target.value)}
+                            className="flex-1 bg-white text-[#141414] text-xs px-2 py-1 border border-[#141414]"
+                            placeholder="名稱"
+                            autoFocus
+                          />
+                        </div>
+                        {m.type === 'area' && (
+                          <div className="flex gap-1 items-center">
+                            <label className="text-[10px] uppercase opacity-60">高度:</label>
+                            <input 
+                              value={editHeight}
+                              onChange={e => setEditHeight(e.target.value)}
+                              className="w-20 bg-white text-[#141414] text-xs px-2 py-1 border border-[#141414]"
+                              placeholder="天花板高度"
+                            />
+                            <span className="text-[10px]">{currentPage?.scale?.unit || 'px'}</span>
+                          </div>
+                        )}
+                        <div className="flex justify-end gap-1">
+                          <button onClick={() => setEditingId(null)} className="p-1 bg-gray-200 text-[#141414]">
+                            <X size={14} />
+                          </button>
+                          <button onClick={saveEdit} className="p-1 bg-green-500 text-white">
+                            <Check size={14} />
+                          </button>
+                        </div>
                       </div>
                     ) : (
                       <div className="flex justify-between items-baseline">
-                        <span className="text-sm font-medium">{m.label}</span>
+                        <div className="flex-1">
+                          <span className="text-sm font-medium">{m.label}</span>
+                          {m.type === 'area' && (
+                            <div className="mt-1 space-y-0.5">
+                              {m.perimeter && (
+                                <div className="text-[10px] opacity-60">周長: {m.perimeter.toFixed(2)} {currentPage?.scale?.unit || 'px'}</div>
+                              )}
+                              {m.height && (
+                                <div className="text-[10px] opacity-60">高度: {m.height.toFixed(2)} {currentPage?.scale?.unit || 'px'}</div>
+                              )}
+                              {m.wallArea && (
+                                <div className="text-[10px] font-bold text-blue-600">牆面積: {m.wallArea.toFixed(2)} {currentPage?.scale?.unit || 'px'}²</div>
+                              )}
+                            </div>
+                          )}
+                        </div>
                         <div className="text-right">
                           <div className="text-lg font-mono leading-none">
                             {m.value.toFixed(2)} <small className="text-[10px]">{m.unit}</small>
@@ -1409,7 +1636,7 @@ export default function App() {
                         <Text
                           x={m.points.reduce((acc, p) => acc + p.x, 0) / m.points.length}
                           y={m.points.reduce((acc, p) => acc + p.y, 0) / m.points.length}
-                          text={`${m.label}: ${m.value.toFixed(2)} ${m.unit}${m.type === 'area' && getPingValue(m.value, m.unit) ? ` (${getPingValue(m.value, m.unit)} 坪)` : ''}`}
+                          text={`${m.label}: ${m.value.toFixed(2)} ${m.unit}${m.type === 'area' && getPingValue(m.value, m.unit) ? ` (${getPingValue(m.value, m.unit)} 坪)` : ''}${m.wallArea ? `\n牆面積: ${m.wallArea.toFixed(2)} ${m.unit}` : ''}`}
                           fontSize={14 / currentPage.stageScale}
                           fontFamily="monospace"
                           fill="#141414"

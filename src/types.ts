@@ -19,6 +19,9 @@ export interface Measurement {
   label: string;
   color: string;
   isRect?: boolean;
+  height?: number; // Ceiling height
+  wallArea?: number; // Calculated wall area
+  perimeter?: number; // Calculated perimeter
 }
 
 export interface Scale {
