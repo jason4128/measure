@@ -87,6 +87,8 @@ export default function App() {
   const [previewPoint, setPreviewPoint] = useState<Point | null>(null);
   const [isAiProcessing, setIsAiProcessing] = useState(false);
   const [hasApiKey, setHasApiKey] = useState(false);
+  const [customApiKey, setCustomApiKey] = useState(() => localStorage.getItem('GEMINI_CUSTOM_API_KEY') || '');
+  const [showApiKeyInput, setShowApiKeyInput] = useState(false);
   const [confirmModal, setConfirmModal] = useState<{
     show: boolean;
     title: string;
@@ -122,8 +124,13 @@ export default function App() {
   const projectInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    localStorage.setItem('GEMINI_CUSTOM_API_KEY', customApiKey);
+    if (customApiKey) setHasApiKey(true);
+  }, [customApiKey]);
+
+  useEffect(() => {
     const checkApiKey = async () => {
-      if (process.env.GEMINI_API_KEY) {
+      if (process.env.GEMINI_API_KEY || customApiKey) {
         setHasApiKey(true);
         return;
       }
@@ -133,7 +140,7 @@ export default function App() {
       }
     };
     checkApiKey();
-  }, []);
+  }, [customApiKey]);
 
   const handleSelectKey = async () => {
     if (window.aistudio?.openSelectKey) {
@@ -543,8 +550,13 @@ export default function App() {
 
     setIsAiProcessing(true);
     try {
-      // 每次呼叫前建立新的實例以獲取最新金鑰
-      const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || '';
+      // 優先級：手動輸入 > 環境變數 > 官方金鑰
+      const apiKey = customApiKey || process.env.GEMINI_API_KEY || process.env.API_KEY || '';
+      
+      if (!apiKey) {
+        throw new Error('API Key is missing. Please provide a valid API key.');
+      }
+
       const aiInstance = new GoogleGenAI({ apiKey });
       
       const base64Data = currentPage.imageSrc.split(',')[1];
@@ -897,10 +909,55 @@ export default function App() {
 
           {/* AI Tools */}
           <section>
-            <h2 className="text-[11px] font-serif italic opacity-50 uppercase tracking-wider mb-3">AI 輔助</h2>
-            {!hasApiKey && !process.env.GEMINI_API_KEY ? (
+            <div className="flex justify-between items-center mb-3">
+              <h2 className="text-[11px] font-serif italic opacity-50 uppercase tracking-wider">AI 輔助</h2>
               <button 
-                onClick={handleSelectKey}
+                onClick={() => setShowApiKeyInput(!showApiKeyInput)}
+                className={`p-1 transition-all rounded-sm ${customApiKey ? 'text-green-600' : 'text-blue-600'}`}
+                title="設定 API 金鑰"
+              >
+                <Settings size={14} />
+              </button>
+            </div>
+
+            <AnimatePresence>
+              {showApiKeyInput && (
+                <motion.div 
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: 'auto', opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  className="overflow-hidden mb-3"
+                >
+                  <div className="p-3 border border-blue-200 bg-blue-50/50 rounded-sm space-y-2">
+                    <label className="text-[9px] uppercase tracking-widest font-bold text-blue-800">手動輸入 Gemini API 金鑰</label>
+                    <div className="flex gap-1">
+                      <input 
+                        type="password"
+                        value={customApiKey}
+                        onChange={(e) => setCustomApiKey(e.target.value)}
+                        placeholder="在此貼入 AIzaSy..."
+                        className="flex-1 bg-white border border-blue-300 px-2 py-1 text-[10px] font-mono focus:outline-none focus:border-blue-500"
+                      />
+                      {customApiKey && (
+                        <button 
+                          onClick={() => { setCustomApiKey(''); localStorage.removeItem('GEMINI_CUSTOM_API_KEY'); }}
+                          className="p-1 text-red-500 hover:bg-red-50"
+                        >
+                          <X size={14} />
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-[8px] text-blue-600/70 leading-tight">
+                      * 金鑰將儲存在您的瀏覽器中。若官方對話框無法運作，請使用此欄位。
+                    </p>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {!hasApiKey && !process.env.GEMINI_API_KEY && !customApiKey ? (
+              <button 
+                onClick={() => setShowApiKeyInput(true)}
                 className="w-full p-4 border border-dashed border-blue-500 bg-blue-50 text-blue-600 flex flex-col items-center justify-center gap-2 hover:bg-blue-100 transition-all"
               >
                 <Settings size={18} />
