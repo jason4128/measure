@@ -66,7 +66,8 @@ const getPolygonArea = (points: Point[]) => {
 // 1 Ping = 3.305785 m2
 const M2_TO_PING = 0.3025;
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+// 產生唯一的 ID，結合時間戳記與隨機字串以避免碰撞
+const generateId = () => `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
 export default function App() {
   const [pages, setPages] = useState<ProjectPage[]>([]);
@@ -85,6 +86,7 @@ export default function App() {
   const [areaColor, setAreaColor] = useState('#10b981');
   const [previewPoint, setPreviewPoint] = useState<Point | null>(null);
   const [isAiProcessing, setIsAiProcessing] = useState(false);
+  const [hasApiKey, setHasApiKey] = useState(false);
   const [confirmModal, setConfirmModal] = useState<{
     show: boolean;
     title: string;
@@ -118,6 +120,27 @@ export default function App() {
   const lastPointerPos = useRef<Point | null>(null); // 保留用於其他可能的增量需求
   const fileInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const checkApiKey = async () => {
+      if (process.env.GEMINI_API_KEY) {
+        setHasApiKey(true);
+        return;
+      }
+      if (window.aistudio?.hasSelectedApiKey) {
+        const selected = await window.aistudio.hasSelectedApiKey();
+        setHasApiKey(selected);
+      }
+    };
+    checkApiKey();
+  }, []);
+
+  const handleSelectKey = async () => {
+    if (window.aistudio?.openSelectKey) {
+      await window.aistudio.openSelectKey();
+      setHasApiKey(true);
+    }
+  };
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -160,7 +183,7 @@ export default function App() {
             const imageSrc = canvas.toDataURL();
             
             const newPage: ProjectPage = {
-              id: Math.random().toString(36).substr(2, 9),
+              id: generateId(),
               name: pdf.numPages > 1 ? `${file.name} (第 ${i} 頁)` : file.name,
               imageSrc,
               scale: null,
@@ -189,7 +212,7 @@ export default function App() {
         const reader = new FileReader();
         reader.onload = () => {
           const newPage: ProjectPage = {
-            id: Math.random().toString(36).substr(2, 9),
+            id: generateId(),
             name: file.name,
             imageSrc: reader.result as string,
             scale: null,
@@ -304,7 +327,7 @@ export default function App() {
       const pixelDist = getPathLength(pointsToUse);
       const realDist = (pixelDist / scale.pixelDistance) * scale.realDistance;
       const newMeasurement: Measurement = {
-        id: Math.random().toString(36).substr(2, 9),
+        id: generateId(),
         type: 'length',
         points: pointsToUse,
         value: realDist,
@@ -318,7 +341,7 @@ export default function App() {
       const pixelArea = getPolygonArea(pointsToUse);
       const realArea = pixelArea * Math.pow(scale.realDistance / scale.pixelDistance, 2);
       const newMeasurement: Measurement = {
-        id: Math.random().toString(36).substr(2, 9),
+        id: generateId(),
         type: 'area',
         points: pointsToUse,
         value: realArea,
@@ -484,7 +507,7 @@ export default function App() {
           } else {
             // Legacy support
             const legacyPage: ProjectPage = {
-              id: Math.random().toString(36).substr(2, 9),
+              id: generateId(),
               name: '匯入專案',
               imageSrc: data.imageSrc,
               scale: data.scale,
@@ -511,8 +534,19 @@ export default function App() {
 
   const detectRoomsWithAI = async () => {
     if (!currentPage || !image) return;
+
+    // 檢查金鑰
+    if (!hasApiKey && !process.env.GEMINI_API_KEY) {
+      await handleSelectKey();
+      return;
+    }
+
     setIsAiProcessing(true);
     try {
+      // 每次呼叫前建立新的實例以獲取最新金鑰
+      const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || '';
+      const aiInstance = new GoogleGenAI({ apiKey });
+      
       const base64Data = currentPage.imageSrc.split(',')[1];
       const prompt = `這是一張建築平面圖。請識別圖中所有的房間或封閉區域。
       請以 JSON 格式返回一個數組，每個對象包含：
@@ -520,7 +554,7 @@ export default function App() {
       - "polygon": 房間邊界的頂點坐標數組，格式為 [[y1, x1], [y2, x2], ...]。坐標應為歸一化坐標 (0-1000)。
       請盡可能精確地勾勒出每個房間的輪廓。`;
 
-      const response = await ai.models.generateContent({
+      const response = await aiInstance.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: [
           {
@@ -573,7 +607,7 @@ export default function App() {
         }
 
         return {
-          id: Math.random().toString(36).substr(2, 9),
+          id: generateId(),
           type: 'area',
           points,
           value,
@@ -864,23 +898,33 @@ export default function App() {
           {/* AI Tools */}
           <section>
             <h2 className="text-[11px] font-serif italic opacity-50 uppercase tracking-wider mb-3">AI 輔助</h2>
-            <button 
-              onClick={detectRoomsWithAI}
-              disabled={!currentPage || isAiProcessing}
-              className={`w-full p-4 border border-[#141414] flex flex-col items-center justify-center gap-2 transition-all relative overflow-hidden ${isAiProcessing ? 'bg-gray-100 cursor-wait' : 'bg-white/40 hover:bg-white/80'}`}
-            >
-              {isAiProcessing && (
-                <motion.div 
-                  className="absolute inset-0 bg-blue-500/10"
-                  animate={{ x: ['-100%', '100%'] }}
-                  transition={{ repeat: Infinity, duration: 1.5, ease: "linear" }}
-                />
-              )}
-              <Sparkles size={18} className={isAiProcessing ? 'animate-pulse text-blue-500' : ''} />
-              <span className="text-[10px] uppercase tracking-widest font-bold">
-                {isAiProcessing ? 'AI 偵測中...' : 'AI 自動偵測房間'}
-              </span>
-            </button>
+            {!hasApiKey && !process.env.GEMINI_API_KEY ? (
+              <button 
+                onClick={handleSelectKey}
+                className="w-full p-4 border border-dashed border-blue-500 bg-blue-50 text-blue-600 flex flex-col items-center justify-center gap-2 hover:bg-blue-100 transition-all"
+              >
+                <Settings size={18} />
+                <span className="text-[10px] uppercase tracking-widest font-bold">請先設定 API 金鑰</span>
+              </button>
+            ) : (
+              <button 
+                onClick={detectRoomsWithAI}
+                disabled={!currentPage || isAiProcessing}
+                className={`w-full p-4 border border-[#141414] flex flex-col items-center justify-center gap-2 transition-all relative overflow-hidden ${isAiProcessing ? 'bg-gray-100 cursor-wait' : 'bg-white/40 hover:bg-white/80'}`}
+              >
+                {isAiProcessing && (
+                  <motion.div 
+                    className="absolute inset-0 bg-blue-500/10"
+                    animate={{ x: ['-100%', '100%'] }}
+                    transition={{ repeat: Infinity, duration: 1.5, ease: "linear" }}
+                  />
+                )}
+                <Sparkles size={18} className={isAiProcessing ? 'animate-pulse text-blue-500' : ''} />
+                <span className="text-[10px] uppercase tracking-widest font-bold">
+                  {isAiProcessing ? 'AI 偵測中...' : 'AI 自動偵測房間'}
+                </span>
+              </button>
+            )}
             <p className="text-[9px] opacity-40 mt-2 leading-tight">
               * AI 將自動識別平面圖中的房間區域並建立面積測量。
             </p>
