@@ -20,12 +20,23 @@ import {
   Minimize2,
   Info,
   Edit3,
-  CheckCircle2
+  CheckCircle2,
+  Sparkles,
+  Layers,
+  FilePlus
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Text, Group } from 'react-konva';
 import useImage from 'use-image';
-import { Tool, Point, Measurement, Scale } from './types';
+import { Tool, Point, Measurement, Scale, ProjectPage } from './types';
+import { GoogleGenAI, Type } from "@google/genai";
+import * as pdfjs from 'pdfjs-dist';
+
+// Set up PDF.js worker
+pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.mjs',
+  import.meta.url
+).toString();
 
 // Utility to calculate distance between two points
 const getDistance = (p1: Point, p2: Point) => {
@@ -55,16 +66,14 @@ const getPolygonArea = (points: Point[]) => {
 // 1 Ping = 3.305785 m2
 const M2_TO_PING = 0.3025;
 
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+
 export default function App() {
-  const [imageSrc, setImageSrc] = useState<string | null>(null);
-  const [image] = useImage(imageSrc || '');
+  const [pages, setPages] = useState<ProjectPage[]>([]);
+  const [currentPageId, setCurrentPageId] = useState<string | null>(null);
   const [tool, setTool] = useState<Tool>('select');
-  const [scale, setScale] = useState<Scale | null>(null);
-  const [measurements, setMeasurements] = useState<Measurement[]>([]);
-  const [currentPoints, setCurrentPoints] = useState<Point[]>([]);
   const [isDrawing, setIsDrawing] = useState(false);
-  const [stageScale, setStageScale] = useState(1);
-  const [stagePos, setStagePos] = useState({ x: 0, y: 0 });
+  const [currentPoints, setCurrentPoints] = useState<Point[]>([]);
   const [showScaleModal, setShowScaleModal] = useState(false);
   const [showHelpModal, setShowHelpModal] = useState(false);
   const [tempPixelDist, setTempPixelDist] = useState(0);
@@ -74,31 +83,146 @@ export default function App() {
   const [editLabel, setEditLabel] = useState('');
   const [lengthColor, setLengthColor] = useState('#3b82f6');
   const [areaColor, setAreaColor] = useState('#10b981');
-
   const [previewPoint, setPreviewPoint] = useState<Point | null>(null);
+  const [isAiProcessing, setIsAiProcessing] = useState(false);
+  const [confirmModal, setConfirmModal] = useState<{
+    show: boolean;
+    title: string;
+    message: string;
+    onConfirm: () => void;
+    type?: 'danger' | 'info';
+  }>({ show: false, title: '', message: '', onConfirm: () => {} });
+  const [errorModal, setErrorModal] = useState<{
+    show: boolean;
+    title: string;
+    message: string;
+  }>({ show: false, title: '', message: '' });
+
+  const updateCurrentPage = useCallback((updates: Partial<ProjectPage> | ((prev: ProjectPage) => Partial<ProjectPage>)) => {
+    if (!currentPageId) return;
+    setPages(prevPages => prevPages.map(p => {
+      if (p.id === currentPageId) {
+        const resolvedUpdates = typeof updates === 'function' ? updates(p) : updates;
+        return { ...p, ...resolvedUpdates };
+      }
+      return p;
+    }));
+  }, [currentPageId]);
+
+  const currentPage = pages.find(p => p.id === currentPageId);
+  const [image] = useImage(currentPage?.imageSrc || '');
 
   const stageRef = useRef<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        // Only delete if not typing in an input
+        if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
+        
+        if (selectedIds.length > 0 && currentPage) {
+          const newMeasurements = currentPage.measurements.filter(m => !selectedIds.includes(m.id));
+          updateCurrentPage({ measurements: newMeasurements });
+          setSelectedIds([]);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedIds, currentPage, updateCurrentPage]);
+
   // Handle image upload
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        setImageSrc(reader.result as string);
-        setMeasurements([]);
-        setScale(null);
-        setStageScale(1);
-        setStagePos({ x: 0, y: 0 });
-      };
-      reader.readAsDataURL(file);
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    Array.from(files).forEach(async (file) => {
+      if (file.type === 'application/pdf') {
+        try {
+          const arrayBuffer = await file.arrayBuffer();
+          const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+          
+          for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const viewport = page.getViewport({ scale: 2.0 });
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+
+            await page.render({ canvasContext: context!, viewport, canvas: canvas as any }).promise;
+            const imageSrc = canvas.toDataURL();
+            
+            const newPage: ProjectPage = {
+              id: Math.random().toString(36).substr(2, 9),
+              name: pdf.numPages > 1 ? `${file.name} (第 ${i} 頁)` : file.name,
+              imageSrc,
+              scale: null,
+              measurements: [],
+              stageScale: 1,
+              stagePos: { x: 0, y: 0 }
+            };
+            
+            setPages(prev => {
+              const newPages = [...prev, newPage];
+              if (newPages.length === 1) {
+                setCurrentPageId(newPage.id);
+              }
+              return newPages;
+            });
+          }
+        } catch (error) {
+          console.error("PDF Error:", error);
+          setErrorModal({
+            show: true,
+            title: '讀取失敗',
+            message: '讀取 PDF 失敗，請檢查檔案是否損壞。'
+          });
+        }
+      } else {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const newPage: ProjectPage = {
+            id: Math.random().toString(36).substr(2, 9),
+            name: file.name,
+            imageSrc: reader.result as string,
+            scale: null,
+            measurements: [],
+            stageScale: 1,
+            stagePos: { x: 0, y: 0 }
+          };
+          setPages(prev => {
+            const newPages = [...prev, newPage];
+            if (newPages.length === 1) {
+              setCurrentPageId(newPage.id);
+            }
+            return newPages;
+          });
+        };
+        reader.readAsDataURL(file);
+      }
+    });
+  };
+
+  const removePage = (id: string) => {
+    if (pages.length <= 1) {
+      setPages([]);
+      setCurrentPageId(null);
+      return;
+    }
+    const newPages = pages.filter(p => p.id !== id);
+    setPages(newPages);
+    if (currentPageId === id) {
+      setCurrentPageId(newPages[0].id);
     }
   };
 
   // Handle stage mouse events
   const handleMouseDown = (e: any) => {
+    if (!currentPage) return;
     const stage = e.target.getStage();
     const point = stage.getRelativePointerPosition();
 
@@ -125,11 +249,10 @@ export default function App() {
         setCurrentPoints([point]);
         setIsDrawing(true);
       } else {
-        // Check if clicking near the last point to finish
         const lastPoint = currentPoints[currentPoints.length - 1];
         const distToLast = getDistance(point, lastPoint);
         
-        if (distToLast < 10 / stageScale && currentPoints.length > 1) {
+        if (distToLast < 10 / currentPage.stageScale && currentPoints.length > 1) {
           finishMeasurement();
         } else {
           setCurrentPoints([...currentPoints, point]);
@@ -140,49 +263,68 @@ export default function App() {
         setCurrentPoints([point]);
         setIsDrawing(true);
       } else {
-        // Check if clicking near the first point to close the polygon
         const firstPoint = currentPoints[0];
         const distToFirst = getDistance(point, firstPoint);
         
-        if (distToFirst < 10 / stageScale && currentPoints.length > 2) {
+        if (distToFirst < 10 / currentPage.stageScale && currentPoints.length > 2) {
           finishMeasurement();
         } else {
           setCurrentPoints([...currentPoints, point]);
         }
       }
+    } else if (tool === 'rect') {
+      if (!isDrawing) {
+        setCurrentPoints([point]);
+        setIsDrawing(true);
+      } else {
+        const p1 = currentPoints[0];
+        const p2 = point;
+        // Create 4 points for the rectangle
+        const rectPoints = [
+          { x: p1.x, y: p1.y },
+          { x: p2.x, y: p1.y },
+          { x: p2.x, y: p2.y },
+          { x: p1.x, y: p2.y }
+        ];
+        setCurrentPoints(rectPoints);
+        finishMeasurement(rectPoints);
+      }
     }
   };
 
-  const finishMeasurement = () => {
-    if (!scale || currentPoints.length < 2) return;
+  const finishMeasurement = (pointsOverride?: Point[]) => {
+    const pointsToUse = pointsOverride || currentPoints;
+    if (!currentPage?.scale || pointsToUse.length < 2) return;
+    const { scale, measurements } = currentPage;
 
     if (tool === 'length') {
-      const pixelDist = getPathLength(currentPoints);
+      const pixelDist = getPathLength(pointsToUse);
       const realDist = (pixelDist / scale.pixelDistance) * scale.realDistance;
       const newMeasurement: Measurement = {
         id: Math.random().toString(36).substr(2, 9),
         type: 'length',
-        points: currentPoints,
+        points: pointsToUse,
         value: realDist,
         unit: scale.unit,
         label: `長度測量 ${measurements.length + 1}`,
         color: lengthColor
       };
-      setMeasurements([...measurements, newMeasurement]);
-    } else if (tool === 'area') {
-      if (currentPoints.length < 3) return;
-      const pixelArea = getPolygonArea(currentPoints);
+      updateCurrentPage({ measurements: [...measurements, newMeasurement] });
+    } else if (tool === 'area' || tool === 'rect') {
+      if (pointsToUse.length < 3) return;
+      const pixelArea = getPolygonArea(pointsToUse);
       const realArea = pixelArea * Math.pow(scale.realDistance / scale.pixelDistance, 2);
       const newMeasurement: Measurement = {
         id: Math.random().toString(36).substr(2, 9),
         type: 'area',
-        points: currentPoints,
+        points: pointsToUse,
         value: realArea,
         unit: `${scale.unit}²`,
-        label: `面積測量 ${measurements.length + 1}`,
-        color: areaColor
+        label: `${tool === 'rect' ? '矩形' : '面積'}測量 ${measurements.length + 1}`,
+        color: areaColor,
+        isRect: tool === 'rect'
       };
-      setMeasurements([...measurements, newMeasurement]);
+      updateCurrentPage({ measurements: [...measurements, newMeasurement] });
     }
     setCurrentPoints([]);
     setIsDrawing(false);
@@ -200,6 +342,7 @@ export default function App() {
   };
 
   const handleWheel = (e: any) => {
+    if (!currentPage) return;
     e.evt.preventDefault();
     const scaleBy = 1.1;
     const stage = stageRef.current;
@@ -212,22 +355,22 @@ export default function App() {
     };
 
     const newScale = e.evt.deltaY < 0 ? oldScale * scaleBy : oldScale / scaleBy;
-    setStageScale(newScale);
-
     const newPos = {
       x: pointer.x - mousePointTo.x * newScale,
       y: pointer.y - mousePointTo.y * newScale,
     };
-    setStagePos(newPos);
+    updateCurrentPage({ stageScale: newScale, stagePos: newPos });
   };
 
   const saveScale = () => {
     const realDist = parseFloat(scaleInput.value);
     if (!isNaN(realDist) && realDist > 0) {
-      setScale({
-        pixelDistance: tempPixelDist,
-        realDistance: realDist,
-        unit: scaleInput.unit
+      updateCurrentPage({
+        scale: {
+          pixelDistance: tempPixelDist,
+          realDistance: realDist,
+          unit: scaleInput.unit
+        }
       });
       setShowScaleModal(false);
       setTool('select');
@@ -236,7 +379,10 @@ export default function App() {
   };
 
   const deleteMeasurement = (id: string) => {
-    setMeasurements(measurements.filter(m => m.id !== id));
+    if (!currentPage) return;
+    updateCurrentPage({
+      measurements: currentPage.measurements.filter(m => m.id !== id)
+    });
     setSelectedIds(selectedIds.filter(sid => sid !== id));
   };
 
@@ -254,18 +400,23 @@ export default function App() {
   };
 
   const saveEdit = () => {
-    if (editingId) {
-      setMeasurements(measurements.map(m => 
-        m.id === editingId ? { ...m, label: editLabel } : m
-      ));
+    if (editingId && currentPage) {
+      updateCurrentPage({
+        measurements: currentPage.measurements.map(m => 
+          m.id === editingId ? { ...m, label: editLabel } : m
+        )
+      });
       setEditingId(null);
     }
   };
 
   const updateMeasurementColor = (id: string, color: string) => {
-    setMeasurements(measurements.map(m => 
-      m.id === id ? { ...m, color } : m
-    ));
+    if (!currentPage) return;
+    updateCurrentPage({
+      measurements: currentPage.measurements.map(m => 
+        m.id === id ? { ...m, color } : m
+      )
+    });
   };
 
   const getPingValue = (value: number, unit: string) => {
@@ -282,10 +433,10 @@ export default function App() {
   };
 
   const downloadCSV = () => {
-    if (measurements.length === 0) return;
+    if (!currentPage || currentPage.measurements.length === 0) return;
     
     const headers = ['名稱', '類型', '數值', '單位', '坪數'];
-    const rows = measurements.map(m => [
+    const rows = currentPage.measurements.map(m => [
       m.label,
       m.type === 'length' ? '長度' : '面積',
       m.value.toFixed(2),
@@ -293,31 +444,21 @@ export default function App() {
       m.type === 'area' ? getPingValue(m.value, m.unit) || '-' : '-'
     ]);
     
-    const csvContent = [
-      headers.join(','),
-      ...rows.map(r => r.join(','))
-    ].join('\n');
-    
+    const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
     const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
-    link.setAttribute('download', '測量紀錄.csv');
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
+    link.setAttribute('download', `測量數據_${currentPage.name}_${new Date().toLocaleDateString()}.csv`);
     link.click();
-    document.body.removeChild(link);
   };
 
   const saveProject = () => {
-    if (!imageSrc) return;
+    if (pages.length === 0) return;
     const projectData = {
-      imageSrc,
-      scale,
-      measurements,
-      stageScale,
-      stagePos,
-      version: '1.0'
+      pages,
+      currentPageId,
+      version: '2.0'
     };
     const blob = new Blob([JSON.stringify(projectData)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -334,23 +475,127 @@ export default function App() {
       reader.onload = () => {
         try {
           const data = JSON.parse(reader.result as string);
-          setImageSrc(data.imageSrc);
-          setScale(data.scale);
-          setMeasurements(data.measurements);
-          setStageScale(data.stageScale || 1);
-          setStagePos(data.stagePos || { x: 0, y: 0 });
+          if (data.version === '2.0') {
+            setPages(data.pages);
+            setCurrentPageId(data.currentPageId);
+          } else {
+            // Legacy support
+            const legacyPage: ProjectPage = {
+              id: Math.random().toString(36).substr(2, 9),
+              name: '匯入專案',
+              imageSrc: data.imageSrc,
+              scale: data.scale,
+              measurements: data.measurements,
+              stageScale: data.stageScale || 1,
+              stagePos: data.stagePos || { x: 0, y: 0 }
+            };
+            setPages([legacyPage]);
+            setCurrentPageId(legacyPage.id);
+          }
           setSelectedIds([]);
           setTool('select');
         } catch (err) {
-          alert('讀取專案檔案失敗，請確保檔案格式正確。');
+          setErrorModal({
+            show: true,
+            title: '讀取失敗',
+            message: '讀取專案檔案失敗，請確保檔案格式正確。'
+          });
         }
       };
       reader.readAsText(file);
     }
   };
 
+  const detectRoomsWithAI = async () => {
+    if (!currentPage || !image) return;
+    setIsAiProcessing(true);
+    try {
+      const base64Data = currentPage.imageSrc.split(',')[1];
+      const prompt = `這是一張建築平面圖。請識別圖中所有的房間或封閉區域。
+      請以 JSON 格式返回一個數組，每個對象包含：
+      - "label": 房間名稱 (例如：客廳, 臥室, 廚房)
+      - "polygon": 房間邊界的頂點坐標數組，格式為 [[y1, x1], [y2, x2], ...]。坐標應為歸一化坐標 (0-1000)。
+      請盡可能精確地勾勒出每個房間的輪廓。`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: [
+          {
+            parts: [
+              { text: prompt },
+              { inlineData: { mimeType: "image/png", data: base64Data } }
+            ]
+          }
+        ],
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                label: { type: Type.STRING },
+                polygon: { 
+                  type: Type.ARRAY, 
+                  items: { 
+                    type: Type.ARRAY, 
+                    items: { type: Type.NUMBER } 
+                  } 
+                }
+              },
+              required: ["label", "polygon"]
+            }
+          }
+        }
+      });
+
+      const detectedRooms = JSON.parse(response.text);
+      if (!image) return;
+      
+      const imgWidth = image.width;
+      const imgHeight = image.height;
+
+      const newMeasurements: Measurement[] = detectedRooms.map((room: any) => {
+        const points = room.polygon.map((p: number[]) => ({
+          x: (p[1] / 1000) * imgWidth,
+          y: (p[0] / 1000) * imgHeight
+        }));
+
+        let value = 0;
+        let unit = 'px²';
+        if (currentPage.scale) {
+          const pixelArea = getPolygonArea(points);
+          value = pixelArea * Math.pow(currentPage.scale.realDistance / currentPage.scale.pixelDistance, 2);
+          unit = `${currentPage.scale.unit}²`;
+        }
+
+        return {
+          id: Math.random().toString(36).substr(2, 9),
+          type: 'area',
+          points,
+          value,
+          unit,
+          label: `AI 偵測: ${room.label}`,
+          color: areaColor
+        };
+      });
+
+      updateCurrentPage({ measurements: [...currentPage.measurements, ...newMeasurements] });
+    } catch (error) {
+      console.error("AI Detection Error:", error);
+      setErrorModal({
+        show: true,
+        title: 'AI 偵測失敗',
+        message: 'AI 偵測失敗，請稍後再試。'
+      });
+    } finally {
+      setIsAiProcessing(false);
+    }
+  };
+
   const getTotals = () => {
-    const selectedItems = measurements.filter(m => selectedIds.includes(m.id));
+    if (!currentPage) return null;
+    const selectedItems = currentPage.measurements.filter(m => selectedIds.includes(m.id));
     if (selectedItems.length === 0) return null;
 
     const totals: { [key: string]: { value: number, unit: string, type: string } } = {};
@@ -366,6 +611,53 @@ export default function App() {
     return Object.values(totals);
   };
 
+  const handlePointDragMove = useCallback((measurementId: string, pointIndex: number, e: any) => {
+    const stage = e.target.getStage();
+    const point = stage.getRelativePointerPosition();
+    
+    updateCurrentPage(prevPage => {
+      if (!prevPage.scale) return {};
+      
+      const newMeasurements = prevPage.measurements.map(m => {
+        if (m.id === measurementId) {
+          const newPoints = [...m.points];
+          newPoints[pointIndex] = point;
+          
+          // Handle rectangle constraints if it's a rectangle
+          if (m.isRect && newPoints.length === 4) {
+            if (pointIndex === 0) { // Top-left
+              newPoints[1] = { ...newPoints[1], y: point.y };
+              newPoints[3] = { ...newPoints[3], x: point.x };
+            } else if (pointIndex === 1) { // Top-right
+              newPoints[0] = { ...newPoints[0], y: point.y };
+              newPoints[2] = { ...newPoints[2], x: point.x };
+            } else if (pointIndex === 2) { // Bottom-right
+              newPoints[1] = { ...newPoints[1], x: point.x };
+              newPoints[3] = { ...newPoints[3], y: point.y };
+            } else if (pointIndex === 3) { // Bottom-left
+              newPoints[0] = { ...newPoints[0], x: point.x };
+              newPoints[2] = { ...newPoints[2], y: point.y };
+            }
+          }
+          
+          let newValue = m.value;
+          if (m.type === 'length') {
+            const pixelDist = getPathLength(newPoints);
+            newValue = (pixelDist / prevPage.scale!.pixelDistance) * prevPage.scale!.realDistance;
+          } else if (m.type === 'area') {
+            const pixelArea = getPolygonArea(newPoints);
+            newValue = pixelArea * Math.pow(prevPage.scale!.realDistance / prevPage.scale!.pixelDistance, 2);
+          }
+          
+          return { ...m, points: newPoints, value: newValue };
+        }
+        return m;
+      });
+      
+      return { measurements: newMeasurements };
+    });
+  }, [updateCurrentPage]);
+
   const totals = getTotals();
 
   return (
@@ -378,6 +670,53 @@ export default function App() {
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-6">
+          {/* Pages Section */}
+          <section>
+            <div className="flex justify-between items-center mb-3">
+              <h2 className="text-[11px] font-serif italic opacity-50 uppercase tracking-wider">圖面列表</h2>
+              <button 
+                onClick={() => fileInputRef.current?.click()}
+                className="p-1 hover:bg-[#141414] hover:text-[#E4E3E0] transition-all rounded-sm"
+                title="新增圖面"
+              >
+                <FilePlus size={16} />
+              </button>
+            </div>
+            <div className="space-y-1">
+              {pages.length === 0 ? (
+                <p className="text-[10px] opacity-40 italic text-center py-2">尚未上傳圖面</p>
+              ) : (
+                pages.map(p => (
+                  <div 
+                    key={p.id}
+                    className={`group flex items-center justify-between p-2 border transition-all cursor-pointer ${currentPageId === p.id ? 'bg-[#141414] text-[#E4E3E0] border-[#141414]' : 'border-transparent hover:border-[#141414]/20'}`}
+                    onClick={() => setCurrentPageId(p.id)}
+                  >
+                    <div className="flex items-center gap-2 overflow-hidden">
+                      <Layers size={14} className="shrink-0 opacity-50" />
+                      <span className="text-[11px] truncate font-medium">{p.name}</span>
+                    </div>
+                    <button 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setConfirmModal({
+                          show: true,
+                          title: '刪除圖面',
+                          message: `確定要刪除「${p.name}」嗎？此動作無法復原。`,
+                          type: 'danger',
+                          onConfirm: () => removePage(p.id)
+                        });
+                      }}
+                      className={`opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition-all ${currentPageId === p.id ? 'text-[#E4E3E0]' : 'text-[#141414]'}`}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </section>
+
           {/* Tools */}
           <section>
             <h2 className="text-[11px] font-serif italic opacity-50 uppercase tracking-wider mb-3">工具箱</h2>
@@ -397,7 +736,7 @@ export default function App() {
                 }} 
                 icon={<Settings size={18} />} 
                 label="設定比例" 
-                disabled={!imageSrc}
+                disabled={!currentPage}
               />
               <div className="relative group">
                 <ToolButton 
@@ -409,9 +748,9 @@ export default function App() {
                   }} 
                   icon={<Ruler size={18} />} 
                   label="長度測量" 
-                  disabled={!scale}
+                  disabled={!currentPage?.scale}
                 />
-                {!(!scale) && (
+                {currentPage?.scale && (
                   <input 
                     type="color" 
                     value={lengthColor} 
@@ -431,9 +770,31 @@ export default function App() {
                   }} 
                   icon={<Square size={18} />} 
                   label="面積測量" 
-                  disabled={!scale}
+                  disabled={!currentPage?.scale}
                 />
-                {!(!scale) && (
+                {currentPage?.scale && (
+                  <input 
+                    type="color" 
+                    value={areaColor} 
+                    onChange={(e) => setAreaColor(e.target.value)}
+                    className="absolute top-1 right-1 w-4 h-4 p-0 border-none bg-transparent cursor-pointer"
+                    title="設定預設面積顏色"
+                  />
+                )}
+              </div>
+              <div className="relative group">
+                <ToolButton 
+                  active={tool === 'rect'} 
+                  onClick={() => {
+                    setTool('rect');
+                    setCurrentPoints([]);
+                    setIsDrawing(false);
+                  }} 
+                  icon={<Square size={18} className="rotate-45" />} 
+                  label="矩形測量" 
+                  disabled={!currentPage?.scale}
+                />
+                {currentPage?.scale && (
                   <input 
                     type="color" 
                     value={areaColor} 
@@ -446,13 +807,38 @@ export default function App() {
             </div>
           </section>
 
+          {/* AI Tools */}
+          <section>
+            <h2 className="text-[11px] font-serif italic opacity-50 uppercase tracking-wider mb-3">AI 輔助</h2>
+            <button 
+              onClick={detectRoomsWithAI}
+              disabled={!currentPage || isAiProcessing}
+              className={`w-full p-4 border border-[#141414] flex flex-col items-center justify-center gap-2 transition-all relative overflow-hidden ${isAiProcessing ? 'bg-gray-100 cursor-wait' : 'bg-white/40 hover:bg-white/80'}`}
+            >
+              {isAiProcessing && (
+                <motion.div 
+                  className="absolute inset-0 bg-blue-500/10"
+                  animate={{ x: ['-100%', '100%'] }}
+                  transition={{ repeat: Infinity, duration: 1.5, ease: "linear" }}
+                />
+              )}
+              <Sparkles size={18} className={isAiProcessing ? 'animate-pulse text-blue-500' : ''} />
+              <span className="text-[10px] uppercase tracking-widest font-bold">
+                {isAiProcessing ? 'AI 偵測中...' : 'AI 自動偵測房間'}
+              </span>
+            </button>
+            <p className="text-[9px] opacity-40 mt-2 leading-tight">
+              * AI 將自動識別平面圖中的房間區域並建立面積測量。
+            </p>
+          </section>
+
           {/* Scale Info */}
-          {scale && (
+          {currentPage?.scale && (
             <section className="p-3 border border-[#141414] rounded-sm bg-white/50">
               <h2 className="text-[10px] font-mono uppercase tracking-tighter opacity-50 mb-1">目前比例尺</h2>
               <div className="flex justify-between items-end">
-                <span className="text-lg font-mono">{scale.realDistance} {scale.unit}</span>
-                <span className="text-[10px] opacity-50 font-mono">≈ {Math.round(scale.pixelDistance)} 像素</span>
+                <span className="text-lg font-mono">{currentPage.scale.realDistance} {currentPage.scale.unit}</span>
+                <span className="text-[10px] opacity-50 font-mono">≈ {Math.round(currentPage.scale.pixelDistance)} 像素</span>
               </div>
             </section>
           )}
@@ -474,7 +860,7 @@ export default function App() {
             <div className="grid grid-cols-2 gap-2">
               <button 
                 onClick={saveProject}
-                disabled={!imageSrc}
+                disabled={pages.length === 0}
                 className="flex flex-col items-center justify-center gap-2 p-3 border border-[#141414] bg-white/40 hover:bg-white/80 transition-all disabled:opacity-20 disabled:cursor-not-allowed"
               >
                 <Download size={16} />
@@ -502,12 +888,12 @@ export default function App() {
             <div className="flex justify-between items-center mb-3">
               <h2 className="text-[11px] font-serif italic opacity-50 uppercase tracking-wider">測量紀錄</h2>
               <div className="flex items-center gap-2">
-                <span className="text-[10px] font-mono opacity-40">{measurements.length} 筆</span>
-                {measurements.length > 0 && (
+                <span className="text-[10px] font-mono opacity-40">{currentPage?.measurements.length || 0} 筆</span>
+                {currentPage && currentPage.measurements.length > 0 && (
                   <div className="flex gap-2">
                     <button 
                       onClick={() => {
-                        const areaIds = measurements.filter(m => m.type === 'area').map(m => m.id);
+                        const areaIds = currentPage.measurements.filter(m => m.type === 'area').map(m => m.id);
                         const allAreasSelected = areaIds.every(id => selectedIds.includes(id)) && areaIds.length > 0;
                         if (allAreasSelected) {
                           setSelectedIds(selectedIds.filter(id => !areaIds.includes(id)));
@@ -521,7 +907,7 @@ export default function App() {
                     </button>
                     <button 
                       onClick={() => {
-                        const lengthIds = measurements.filter(m => m.type === 'length').map(m => m.id);
+                        const lengthIds = currentPage.measurements.filter(m => m.type === 'length').map(m => m.id);
                         const allLengthsSelected = lengthIds.every(id => selectedIds.includes(id)) && lengthIds.length > 0;
                         if (allLengthsSelected) {
                           setSelectedIds(selectedIds.filter(id => !lengthIds.includes(id)));
@@ -535,15 +921,15 @@ export default function App() {
                     </button>
                     <button 
                       onClick={() => {
-                        if (selectedIds.length === measurements.length) {
+                        if (selectedIds.length === currentPage.measurements.length) {
                           setSelectedIds([]);
                         } else {
-                          setSelectedIds(measurements.map(m => m.id));
+                          setSelectedIds(currentPage.measurements.map(m => m.id));
                         }
                       }}
                       className="text-[10px] text-gray-500 hover:underline"
                     >
-                      {selectedIds.length === measurements.length ? '取消全選' : '全選全部'}
+                      {selectedIds.length === currentPage.measurements.length ? '取消全選' : '全選全部'}
                     </button>
                     <button 
                       onClick={downloadCSV}
@@ -553,14 +939,37 @@ export default function App() {
                     </button>
                     <button 
                       onClick={() => {
-                        if (confirm('確定要刪除所有測量紀錄嗎？')) {
-                          setMeasurements([]);
-                          setSelectedIds([]);
-                        }
+                        setConfirmModal({
+                          show: true,
+                          title: '刪除所有紀錄',
+                          message: '確定要刪除此圖面的所有測量紀錄嗎？',
+                          type: 'danger',
+                          onConfirm: () => {
+                            updateCurrentPage({ measurements: [] });
+                            setSelectedIds([]);
+                          }
+                        });
                       }}
                       className="text-[10px] text-red-500 hover:underline"
                     >
                       全部刪除
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setConfirmModal({
+                          show: true,
+                          title: '一鍵清除',
+                          message: '確定要清空此圖面的所有數據嗎？（包含比例尺）',
+                          type: 'danger',
+                          onConfirm: () => {
+                            updateCurrentPage({ measurements: [], scale: null });
+                            setSelectedIds([]);
+                          }
+                        });
+                      }}
+                      className="text-[10px] text-red-700 font-bold hover:underline"
+                    >
+                      一鍵清除
                     </button>
                   </div>
                 )}
@@ -592,12 +1001,12 @@ export default function App() {
             )}
             
             <div className="space-y-2">
-              {measurements.length === 0 ? (
+              {!currentPage || currentPage.measurements.length === 0 ? (
                 <div className="py-8 text-center border border-dashed border-[#141414]/20 rounded-sm">
                   <p className="text-xs opacity-40 italic">尚無測量紀錄</p>
                 </div>
               ) : (
-                measurements.map((m) => (
+                currentPage.measurements.map((m) => (
                   <div 
                     key={m.id}
                     className={`p-3 border border-[#141414] transition-all cursor-pointer group ${selectedIds.includes(m.id) ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-white/40'}`}
@@ -670,47 +1079,49 @@ export default function App() {
 
         <div className="p-4 border-t border-[#141414]">
           <button 
-            onClick={() => fileInputRef.current?.click()}
-            className="w-full py-3 border border-[#141414] flex items-center justify-center gap-2 hover:bg-[#141414] hover:text-[#E4E3E0] transition-all uppercase text-xs tracking-widest font-bold"
+            onClick={saveProject}
+            disabled={pages.length === 0}
+            className="w-full py-3 border border-[#141414] flex items-center justify-center gap-2 hover:bg-[#141414] hover:text-[#E4E3E0] transition-all uppercase text-xs tracking-widest font-bold disabled:opacity-20"
           >
-            <Upload size={16} />
-            上傳圖片
+            <Download size={16} />
+            儲存專案 (.meas)
           </button>
-          <input 
-            type="file" 
-            ref={fileInputRef} 
-            className="hidden" 
-            accept="image/*" 
-            onChange={handleImageUpload} 
-          />
         </div>
       </div>
 
       {/* Main Canvas Area */}
       <div className="flex-1 relative bg-[#D1D0CC] overflow-hidden flex items-center justify-center">
-        {!imageSrc ? (
+        {!currentPage ? (
           <div className="text-center max-w-md p-8 border border-dashed border-[#141414]/30 rounded-lg">
             <div className="w-16 h-16 bg-[#141414]/5 rounded-full flex items-center justify-center mx-auto mb-4">
               <Upload size={32} className="opacity-20" />
             </div>
             <h3 className="text-xl font-serif italic mb-2">準備好開始測量了嗎？</h3>
             <p className="text-sm opacity-60 mb-6">上傳建築圖面、地圖或任何帶有已知尺寸的照片。</p>
-            <button 
-              onClick={() => fileInputRef.current?.click()}
-              className="px-6 py-2 bg-[#141414] text-[#E4E3E0] rounded-sm text-xs uppercase tracking-widest font-bold hover:opacity-90 transition-all"
-            >
-              選擇圖片
-            </button>
+            <div className="flex gap-3 justify-center">
+              <button 
+                onClick={() => fileInputRef.current?.click()}
+                className="px-6 py-2 bg-[#141414] text-[#E4E3E0] rounded-sm text-xs uppercase tracking-widest font-bold hover:opacity-90 transition-all"
+              >
+                選擇圖片
+              </button>
+              <button 
+                onClick={() => projectInputRef.current?.click()}
+                className="px-6 py-2 border border-[#141414] rounded-sm text-xs uppercase tracking-widest font-bold hover:bg-white transition-all"
+              >
+                開啟專案
+              </button>
+            </div>
           </div>
         ) : (
           <div className="w-full h-full cursor-crosshair">
             <Stage
               width={window.innerWidth - 320}
               height={window.innerHeight}
-              scaleX={stageScale}
-              scaleY={stageScale}
-              x={stagePos.x}
-              y={stagePos.y}
+              scaleX={currentPage.stageScale}
+              scaleY={currentPage.stageScale}
+              x={currentPage.stagePos.x}
+              y={currentPage.stagePos.y}
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
               onWheel={handleWheel}
@@ -721,7 +1132,7 @@ export default function App() {
                 {image && <KonvaImage image={image} />}
                 
                 {/* Existing Measurements */}
-                {measurements.map((m) => (
+                {currentPage.measurements.map((m) => (
                   <Group 
                     key={m.id} 
                     onClick={() => toggleSelection(m.id)}
@@ -732,16 +1143,36 @@ export default function App() {
                         <Line
                           points={m.points.flatMap(p => [p.x, p.y])}
                           stroke={selectedIds.includes(m.id) ? '#141414' : m.color}
-                          strokeWidth={(selectedIds.includes(m.id) ? 3 : 2) / stageScale}
+                          strokeWidth={(selectedIds.includes(m.id) ? 3 : 2) / currentPage.stageScale}
                         />
                         {m.points.map((p, i) => (
-                          <Circle key={i} x={p.x} y={p.y} radius={(selectedIds.includes(m.id) ? 5 : 4) / stageScale} fill={selectedIds.includes(m.id) ? '#141414' : m.color} />
+                          <Circle 
+                            key={i} 
+                            x={p.x} 
+                            y={p.y} 
+                            radius={(selectedIds.includes(m.id) ? 6 : 4) / currentPage.stageScale} 
+                            fill={selectedIds.includes(m.id) ? '#141414' : m.color}
+                            stroke="white"
+                            strokeWidth={1 / currentPage.stageScale}
+                            draggable={selectedIds.includes(m.id) && tool === 'select'}
+                            onDragMove={(e) => handlePointDragMove(m.id, i, e)}
+                            onMouseEnter={(e) => {
+                              if (selectedIds.includes(m.id) && tool === 'select') {
+                                const container = e.target.getStage().container();
+                                container.style.cursor = 'move';
+                              }
+                            }}
+                            onMouseLeave={(e) => {
+                              const container = e.target.getStage().container();
+                              container.style.cursor = tool === 'select' ? 'default' : 'crosshair';
+                            }}
+                          />
                         ))}
                         <Text
                           x={m.points[0].x}
-                          y={m.points[0].y - 20 / stageScale}
+                          y={m.points[0].y - 20 / currentPage.stageScale}
                           text={`${m.label}: ${m.value.toFixed(2)} ${m.unit}`}
-                          fontSize={14 / stageScale}
+                          fontSize={14 / currentPage.stageScale}
                           fontFamily="monospace"
                           fill="#141414"
                           align="center"
@@ -753,18 +1184,38 @@ export default function App() {
                         <Line
                           points={m.points.flatMap(p => [p.x, p.y])}
                           stroke={selectedIds.includes(m.id) ? '#141414' : m.color}
-                          strokeWidth={(selectedIds.includes(m.id) ? 3 : 2) / stageScale}
+                          strokeWidth={(selectedIds.includes(m.id) ? 3 : 2) / currentPage.stageScale}
                           fill={m.color + (selectedIds.includes(m.id) ? '66' : '33')}
                           closed
                         />
                         {m.points.map((p, i) => (
-                          <Circle key={i} x={p.x} y={p.y} radius={(selectedIds.includes(m.id) ? 5 : 4) / stageScale} fill={selectedIds.includes(m.id) ? '#141414' : m.color} />
+                          <Circle 
+                            key={i} 
+                            x={p.x} 
+                            y={p.y} 
+                            radius={(selectedIds.includes(m.id) ? 6 : 4) / currentPage.stageScale} 
+                            fill={selectedIds.includes(m.id) ? '#141414' : m.color}
+                            stroke="white"
+                            strokeWidth={1 / currentPage.stageScale}
+                            draggable={selectedIds.includes(m.id) && tool === 'select'}
+                            onDragMove={(e) => handlePointDragMove(m.id, i, e)}
+                            onMouseEnter={(e) => {
+                              if (selectedIds.includes(m.id) && tool === 'select') {
+                                const container = e.target.getStage().container();
+                                container.style.cursor = 'move';
+                              }
+                            }}
+                            onMouseLeave={(e) => {
+                              const container = e.target.getStage().container();
+                              container.style.cursor = tool === 'select' ? 'default' : 'crosshair';
+                            }}
+                          />
                         ))}
                         <Text
                           x={m.points.reduce((acc, p) => acc + p.x, 0) / m.points.length}
                           y={m.points.reduce((acc, p) => acc + p.y, 0) / m.points.length}
                           text={`${m.label}: ${m.value.toFixed(2)} ${m.unit}${m.type === 'area' && getPingValue(m.value, m.unit) ? ` (${getPingValue(m.value, m.unit)} 坪)` : ''}`}
-                          fontSize={14 / stageScale}
+                          fontSize={14 / currentPage.stageScale}
                           fontFamily="monospace"
                           fill="#141414"
                           align="center"
@@ -783,25 +1234,41 @@ export default function App() {
                         <Line
                           points={[currentPoints[0].x, currentPoints[0].y, previewPoint.x, previewPoint.y]}
                           stroke="#ef4444"
-                          strokeWidth={2 / stageScale}
+                          strokeWidth={2 / currentPage.stageScale}
                           dash={[5, 5]}
                         />
-                        <Circle x={currentPoints[0].x} y={currentPoints[0].y} radius={4 / stageScale} fill="#ef4444" />
+                        <Circle x={currentPoints[0].x} y={currentPoints[0].y} radius={4 / currentPage.stageScale} fill="#ef4444" />
                       </>
-                    ) : (tool === 'length' || tool === 'area') && (
+                    ) : (tool === 'length' || tool === 'area') ? (
                       <>
                         <Line
                           points={[...currentPoints.flatMap(p => [p.x, p.y]), previewPoint.x, previewPoint.y]}
                           stroke="#ef4444"
-                          strokeWidth={2 / stageScale}
+                          strokeWidth={2 / currentPage.stageScale}
                           dash={[5, 5]}
                           closed={false}
                         />
                         {currentPoints.map((p, i) => (
-                          <Circle key={i} x={p.x} y={p.y} radius={4 / stageScale} fill="#ef4444" />
+                          <Circle key={i} x={p.x} y={p.y} radius={4 / currentPage.stageScale} fill="#ef4444" />
                         ))}
                       </>
-                    )}
+                    ) : tool === 'rect' ? (
+                      <>
+                        <Line
+                          points={[
+                            currentPoints[0].x, currentPoints[0].y,
+                            previewPoint.x, currentPoints[0].y,
+                            previewPoint.x, previewPoint.y,
+                            currentPoints[0].x, previewPoint.y
+                          ]}
+                          stroke="#ef4444"
+                          strokeWidth={2 / currentPage.stageScale}
+                          dash={[5, 5]}
+                          closed
+                        />
+                        <Circle x={currentPoints[0].x} y={currentPoints[0].y} radius={4 / currentPage.stageScale} fill="#ef4444" />
+                      </>
+                    ) : null}
                   </Group>
                 )}
               </Layer>
@@ -810,21 +1277,20 @@ export default function App() {
             {/* Canvas Controls Overlay */}
             <div className="absolute bottom-6 right-6 flex flex-col gap-2">
               <button 
-                onClick={() => setStageScale(s => s * 1.2)}
+                onClick={() => updateCurrentPage({ stageScale: currentPage.stageScale * 1.2 })}
                 className="w-10 h-10 bg-white border border-[#141414] flex items-center justify-center hover:bg-[#141414] hover:text-[#E4E3E0] transition-all"
               >
                 <Maximize2 size={18} />
               </button>
               <button 
-                onClick={() => setStageScale(s => s / 1.2)}
+                onClick={() => updateCurrentPage({ stageScale: currentPage.stageScale / 1.2 })}
                 className="w-10 h-10 bg-white border border-[#141414] flex items-center justify-center hover:bg-[#141414] hover:text-[#E4E3E0] transition-all"
               >
                 <Minimize2 size={18} />
               </button>
               <button 
                 onClick={() => {
-                  setStageScale(1);
-                  setStagePos({ x: 0, y: 0 });
+                  updateCurrentPage({ stageScale: 1, stagePos: { x: 0, y: 0 } });
                 }}
                 className="w-10 h-10 bg-white border border-[#141414] flex items-center justify-center hover:bg-[#141414] hover:text-[#E4E3E0] transition-all"
               >
@@ -863,7 +1329,7 @@ export default function App() {
                 </button>
                 {((tool === 'length' && currentPoints.length > 1) || (tool === 'area' && currentPoints.length > 2)) && (
                   <button 
-                    onClick={finishMeasurement}
+                    onClick={() => finishMeasurement()}
                     className="bg-blue-600 text-white px-6 py-2 rounded-full flex items-center gap-2 shadow-lg hover:bg-blue-700 transition-all font-bold text-sm"
                   >
                     <CheckCircle2 size={18} />
@@ -878,6 +1344,67 @@ export default function App() {
 
       {/* Scale Input Modal */}
       <AnimatePresence>
+        {/* Modals */}
+        <AnimatePresence>
+          {confirmModal.show && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white border border-[#141414] p-6 max-w-sm w-full shadow-2xl"
+              >
+                <h3 className={`text-lg font-serif italic mb-2 ${confirmModal.type === 'danger' ? 'text-red-600' : ''}`}>
+                  {confirmModal.title}
+                </h3>
+                <p className="text-sm opacity-70 mb-6">{confirmModal.message}</p>
+                <div className="flex justify-end gap-3">
+                  <button 
+                    onClick={() => setConfirmModal(prev => ({ ...prev, show: false }))}
+                    className="px-4 py-2 text-xs uppercase tracking-widest hover:bg-gray-100 transition-all"
+                  >
+                    取消
+                  </button>
+                  <button 
+                    onClick={() => {
+                      confirmModal.onConfirm();
+                      setConfirmModal(prev => ({ ...prev, show: false }));
+                    }}
+                    className={`px-4 py-2 text-xs uppercase tracking-widest text-white transition-all ${confirmModal.type === 'danger' ? 'bg-red-600 hover:bg-red-700' : 'bg-[#141414] hover:bg-black'}`}
+                  >
+                    確定
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+
+          {errorModal.show && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white border border-[#141414] p-6 max-w-sm w-full shadow-2xl"
+              >
+                <div className="flex items-center gap-2 text-red-600 mb-2">
+                  <X size={20} />
+                  <h3 className="text-lg font-serif italic">{errorModal.title}</h3>
+                </div>
+                <p className="text-sm opacity-70 mb-6">{errorModal.message}</p>
+                <div className="flex justify-end">
+                  <button 
+                    onClick={() => setErrorModal(prev => ({ ...prev, show: false }))}
+                    className="px-4 py-2 text-xs uppercase tracking-widest bg-[#141414] text-white hover:bg-black transition-all"
+                  >
+                    關閉
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
         {showScaleModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#141414]/40 backdrop-blur-sm">
             <motion.div 
@@ -1000,6 +1527,23 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
+
+      {/* Hidden Inputs */}
+      <input 
+        type="file" 
+        ref={fileInputRef} 
+        className="hidden" 
+        accept="image/*,.pdf" 
+        multiple
+        onChange={handleImageUpload} 
+      />
+      <input 
+        type="file" 
+        ref={projectInputRef} 
+        className="hidden" 
+        accept=".meas" 
+        onChange={loadProject} 
+      />
     </div>
   );
 }

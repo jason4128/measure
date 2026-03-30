@@ -13,6 +13,10 @@ export default defineConfig(({mode}) => {
     
     plugins: [react(), tailwindcss()],
     
+    build: {
+      target: 'esnext',
+    },
+    
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
     },

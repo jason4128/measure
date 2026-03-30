@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type Tool = 'select' | 'scale' | 'length' | 'area';
+export type Tool = 'select' | 'scale' | 'length' | 'area' | 'rect';
 
 export interface Point {
   x: number;
@@ -18,10 +18,21 @@ export interface Measurement {
   unit: string;
   label: string;
   color: string;
+  isRect?: boolean;
 }
 
 export interface Scale {
   pixelDistance: number;
   realDistance: number;
   unit: string;
+}
+
+export interface ProjectPage {
+  id: string;
+  name: string;
+  imageSrc: string;
+  scale: Scale | null;
+  measurements: Measurement[];
+  stageScale: number;
+  stagePos: Point;
 }
