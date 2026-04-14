@@ -1,19 +1,24 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig, loadEnv} from 'vite';
+import { fileURLToPath } from 'url';
+import { defineConfig, loadEnv } from 'vite';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export default defineConfig(({mode}) => {
   // 載入環境變數
   const env = loadEnv(mode, '.', '');
   
   return {
-    base: './', 
+    base: '/', 
     
     plugins: [react(), tailwindcss()],
     
     build: {
       target: 'esnext',
+      outDir: 'dist',
     },
     
     define: {
@@ -22,7 +27,7 @@ export default defineConfig(({mode}) => {
     
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(__dirname, './src'),
       },
     },
     

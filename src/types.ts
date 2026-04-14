@@ -1,27 +1,23 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
-export type Tool = 'select' | 'scale' | 'length' | 'area' | 'rect';
 
 export interface Point {
   x: number;
   y: number;
 }
 
-export interface Measurement {
+export interface Wall {
   id: string;
-  type: 'length' | 'area';
+  points: Point[]; // Using points array for consistency with measurements
+  thickness: number;
+  height: number;
+  color?: string;
+  label?: string;
+}
+
+export interface Door {
+  id: string;
   points: Point[];
-  value: number; // Real-world value
-  unit: string;
-  label: string;
-  color: string;
-  isRect?: boolean;
-  height?: number; // Ceiling height
-  wallArea?: number; // Calculated wall area
-  perimeter?: number; // Calculated perimeter
+  width: number;
+  label?: string;
 }
 
 export interface Scale {
@@ -30,12 +26,36 @@ export interface Scale {
   unit: string;
 }
 
+export interface Measurement {
+  id: string;
+  type: 'length' | 'area';
+  points: Point[];
+  value: number;
+  unit: string;
+  label: string;
+  color: string;
+  perimeter?: number;
+  height?: number;
+  wallArea?: number;
+  isRect?: boolean;
+}
+
 export interface ProjectPage {
   id: string;
   name: string;
   imageSrc: string;
   scale: Scale | null;
   measurements: Measurement[];
+  walls: Wall[];
+  doors: Door[];
   stageScale: number;
   stagePos: Point;
+}
+
+export type Tool = 'select' | 'scale' | 'length' | 'area' | 'rect' | 'wall' | 'door';
+
+export interface AppState {
+  pages: ProjectPage[];
+  currentPageId: string | null;
+  viewMode: '2d' | '3d';
 }

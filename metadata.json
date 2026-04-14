@@ -1,5 +1,5 @@
 {
   "name": "工程平面圖系統",
-  "description": "Upload images with known dimensions to measure lengths and areas accurately.",
+  "description": "上傳平面圖，自動偵測牆體並生成 3D 模型進行預覽與編輯。",
   "requestFramePermissions": []
 }

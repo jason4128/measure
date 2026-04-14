@@ -23,14 +23,16 @@ import {
   CheckCircle2,
   Sparkles,
   Layers,
-  FilePlus
+  FilePlus,
+  Clipboard
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Text, Group } from 'react-konva';
 import useImage from 'use-image';
-import { Tool, Point, Measurement, Scale, ProjectPage } from './types';
+import { Tool, Point, Measurement, Scale, ProjectPage, Wall, Door } from './types';
 import { GoogleGenAI, Type } from "@google/genai";
 import * as pdfjs from 'pdfjs-dist';
+import { ThreeDViewer } from './components/ThreeDViewer';
 
 declare global {
   interface Window {
@@ -90,6 +92,7 @@ const generateId = () => `${Date.now()}-${Math.random().toString(36).substr(2, 9
 export default function App() {
   const [pages, setPages] = useState<ProjectPage[]>([]);
   const [currentPageId, setCurrentPageId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'2d' | '3d'>('2d');
   const [tool, setTool] = useState<Tool>('select');
   const [isDrawing, setIsDrawing] = useState(false);
   const [currentPoints, setCurrentPoints] = useState<Point[]>([]);
@@ -112,6 +115,8 @@ export default function App() {
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
   const [globalHeight, setGlobalHeight] = useState<string>('2.8'); // Default global height
   const [isEditingScale, setIsEditingScale] = useState(false);
+  const [isSpacePressed, setIsSpacePressed] = useState(false);
+  const [isMiddleMouseDown, setIsMiddleMouseDown] = useState(false);
   const [confirmModal, setConfirmModal] = useState<{
     show: boolean;
     title: string;
@@ -174,20 +179,54 @@ export default function App() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        setIsSpacePressed(true);
+      }
+
+      if (e.key === 'Escape') {
+        setCurrentPoints([]);
+        setIsDrawing(false);
+        setSelectedIds([]);
+      }
+
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        // Only delete if not typing in an input
-        if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
-        
         if (selectedIds.length > 0 && currentPage) {
           const newMeasurements = currentPage.measurements.filter(m => !selectedIds.includes(m.id));
-          updateCurrentPage({ measurements: newMeasurements });
+          const newWalls = currentPage.walls.filter(w => !selectedIds.includes(w.id));
+          const newDoors = currentPage.doors.filter(d => !selectedIds.includes(d.id));
+          updateCurrentPage({ 
+            measurements: newMeasurements,
+            walls: newWalls,
+            doors: newDoors
+          });
           setSelectedIds([]);
         }
       }
     };
 
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        setIsSpacePressed(false);
+      }
+    };
+
+    const handleGlobalMouseUp = (e: MouseEvent) => {
+      if (e.button === 1) {
+        setIsMiddleMouseDown(false);
+      }
+    };
+
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('mouseup', handleGlobalMouseUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('mouseup', handleGlobalMouseUp);
+    };
   }, [selectedIds, currentPage, updateCurrentPage]);
 
   // Handle image upload
@@ -196,60 +235,40 @@ export default function App() {
     if (!files || files.length === 0) return;
 
     Array.from(files).forEach(async (file) => {
-      if (file.type === 'application/pdf') {
-        try {
-          const arrayBuffer = await file.arrayBuffer();
-          const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
-          
-          for (let i = 1; i <= pdf.numPages; i++) {
-            const page = await pdf.getPage(i);
-            const viewport = page.getViewport({ scale: 2.0 });
-            const canvas = document.createElement('canvas');
-            const context = canvas.getContext('2d');
-            canvas.height = viewport.height;
-            canvas.width = viewport.width;
+      processFile(file);
+    });
+  };
 
-            await page.render({ canvasContext: context!, viewport, canvas: canvas as any }).promise;
-            const imageSrc = canvas.toDataURL();
-            
-            const newPage: ProjectPage = {
-              id: generateId(),
-              name: pdf.numPages > 1 ? `${file.name} (第 ${i} 頁)` : file.name,
-              imageSrc,
-              scale: null,
-              measurements: [],
-              stageScale: 1,
-              stagePos: { x: 0, y: 0 }
-            };
-            
-            setPages(prev => {
-              const newPages = [...prev, newPage];
-              if (newPages.length === 1) {
-                setCurrentPageId(newPage.id);
-              }
-              return newPages;
-            });
-          }
-        } catch (error) {
-          console.error("PDF Error:", error);
-          setErrorModal({
-            show: true,
-            title: '讀取失敗',
-            message: '讀取 PDF 失敗，請檢查檔案是否損壞。'
-          });
-        }
-      } else {
-        const reader = new FileReader();
-        reader.onload = () => {
+  const processFile = async (file: File) => {
+    if (file.type === 'application/pdf') {
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const uint8Array = new Uint8Array(arrayBuffer);
+        const pdf = await pdfjs.getDocument({ data: uint8Array }).promise;
+        
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const viewport = page.getViewport({ scale: 2.0 });
+          const canvas = document.createElement('canvas');
+          const context = canvas.getContext('2d');
+          canvas.height = viewport.height;
+          canvas.width = viewport.width;
+
+          await page.render({ canvasContext: context!, viewport, canvas: canvas as any }).promise;
+          const imageSrc = canvas.toDataURL();
+          
           const newPage: ProjectPage = {
             id: generateId(),
-            name: file.name,
-            imageSrc: reader.result as string,
+            name: pdf.numPages > 1 ? `${file.name} (第 ${i} 頁)` : file.name,
+            imageSrc,
             scale: null,
             measurements: [],
+            walls: [],
+            doors: [],
             stageScale: 1,
             stagePos: { x: 0, y: 0 }
           };
+          
           setPages(prev => {
             const newPages = [...prev, newPage];
             if (newPages.length === 1) {
@@ -257,11 +276,60 @@ export default function App() {
             }
             return newPages;
           });
-        };
-        reader.readAsDataURL(file);
+        }
+      } catch (error) {
+        console.error("PDF Error:", error);
+        setErrorModal({
+          show: true,
+          title: '讀取失敗',
+          message: '讀取 PDF 失敗，請檢查檔案是否損壞。'
+        });
       }
-    });
+    } else {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const newPage: ProjectPage = {
+          id: generateId(),
+          name: file.name || `貼上圖片 ${new Date().toLocaleTimeString()}`,
+          imageSrc: reader.result as string,
+          scale: null,
+          measurements: [],
+          walls: [],
+          doors: [],
+          stageScale: 1,
+          stagePos: { x: 0, y: 0 }
+        };
+        setPages(prev => {
+          const newPages = [...prev, newPage];
+          if (newPages.length === 1) {
+            setCurrentPageId(newPage.id);
+          }
+          return newPages;
+        });
+      };
+      reader.readAsDataURL(file);
+    }
   };
+
+  // Handle clipboard paste
+  useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') !== -1) {
+          const blob = items[i].getAsFile();
+          if (blob) {
+            processFile(blob);
+          }
+        }
+      }
+    };
+
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, []);
 
   const removePage = (id: string) => {
     if (pages.length <= 1) {
@@ -278,6 +346,13 @@ export default function App() {
 
   // Handle stage mouse events
   const handleMouseDown = (e: any) => {
+    if (e.evt.button === 1) {
+      setIsMiddleMouseDown(true);
+      return;
+    }
+    if (isSpacePressed) {
+      return;
+    }
     if (!currentPage) return;
     const stage = e.target.getStage();
     const point = stage.getRelativePointerPosition();
@@ -289,7 +364,15 @@ export default function App() {
       return;
     }
 
-    if (tool === 'scale') {
+    if (tool === 'wall' || tool === 'door') {
+      if (!isDrawing) {
+        setCurrentPoints([point]);
+        setIsDrawing(true);
+      } else {
+        const points = [currentPoints[0], point];
+        finishWallOrDoor(points);
+      }
+    } else if (tool === 'scale') {
       if (!isDrawing) {
         setCurrentPoints([point]);
         setIsDrawing(true);
@@ -346,6 +429,33 @@ export default function App() {
         finishMeasurement(rectPoints);
       }
     }
+  };
+
+  const finishWallOrDoor = (points: Point[]) => {
+    if (!currentPage || points.length < 2) return;
+    const { walls, doors, scale } = currentPage;
+
+    if (tool === 'wall') {
+      const newWall: Wall = {
+        id: generateId(),
+        points,
+        thickness: 0.2,
+        height: parseFloat(globalHeight) || 2.8,
+        color: '#94a3b8',
+        label: `牆面 ${walls.length + 1}`
+      };
+      updateCurrentPage({ walls: [...walls, newWall] });
+    } else if (tool === 'door') {
+      const newDoor: Door = {
+        id: generateId(),
+        points,
+        width: scale ? (getDistance(points[0], points[1]) / scale.pixelDistance) * scale.realDistance : 0.9,
+        label: `門 ${doors.length + 1}`
+      };
+      updateCurrentPage({ doors: [...doors, newDoor] });
+    }
+    setCurrentPoints([]);
+    setIsDrawing(false);
   };
 
   const finishMeasurement = (pointsOverride?: Point[]) => {
@@ -451,7 +561,9 @@ export default function App() {
   const deleteMeasurement = (id: string) => {
     if (!currentPage) return;
     updateCurrentPage({
-      measurements: currentPage.measurements.filter(m => m.id !== id)
+      measurements: currentPage.measurements.filter(m => m.id !== id),
+      walls: currentPage.walls.filter(w => w.id !== id),
+      doors: currentPage.doors.filter(d => d.id !== id)
     });
     setSelectedIds(selectedIds.filter(sid => sid !== id));
   };
@@ -622,6 +734,8 @@ export default function App() {
               imageSrc: data.imageSrc,
               scale: data.scale,
               measurements: data.measurements,
+              walls: data.walls || [],
+              doors: data.doors || [],
               stageScale: data.stageScale || 1,
               stagePos: data.stagePos || { x: 0, y: 0 }
             };
@@ -768,6 +882,109 @@ export default function App() {
     }
   };
 
+  const detectWallsAndDoorsWithAI = async () => {
+    if (!currentPage || !image) return;
+
+    if (!hasApiKey && !process.env.GEMINI_API_KEY && !customApiKey) {
+      setShowApiKeyInput(true);
+      return;
+    }
+
+    setIsAiProcessing(true);
+    try {
+      const apiKey = customApiKey || process.env.GEMINI_API_KEY || process.env.API_KEY || '';
+      const aiInstance = new GoogleGenAI({ apiKey });
+      const base64Data = currentPage.imageSrc.split(',')[1];
+      
+      const prompt = `這是一張建築平面圖。請識別圖中所有的牆 (Walls) 和門 (Doors)。
+      請以 JSON 格式返回一個數組，每個對象包含：
+      - "type": "wall" 或 "door"
+      - "label": 名稱
+      - "points": 線段的兩個端點，格式為 [[y1, x1], [y2, x2]]。坐標應為歸一化坐標 (0-1000)。
+      請儘可能精確地描繪牆的中心線。`;
+
+      const response = await aiInstance.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: [
+          {
+            parts: [
+              { text: prompt },
+              { inlineData: { mimeType: "image/png", data: base64Data } }
+            ]
+          }
+        ],
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                type: { type: Type.STRING, enum: ["wall", "door"] },
+                label: { type: Type.STRING },
+                points: { 
+                  type: Type.ARRAY, 
+                  items: { 
+                    type: Type.ARRAY,
+                    items: { type: Type.NUMBER }
+                  },
+                  description: "[[y1, x1], [y2, x2]]"
+                }
+              },
+              required: ["type", "label", "points"]
+            }
+          }
+        }
+      });
+
+      const detected = JSON.parse(response.text);
+      const imgWidth = image.width;
+      const imgHeight = image.height;
+
+      const newWalls: Wall[] = [];
+      const newDoors: Door[] = [];
+
+      detected.forEach((item: any) => {
+        const points = item.points.map((p: number[]) => ({
+          x: (p[1] / 1000) * imgWidth,
+          y: (p[0] / 1000) * imgHeight
+        }));
+
+        if (item.type === 'wall') {
+          newWalls.push({
+            id: generateId(),
+            points,
+            thickness: 0.2,
+            height: parseFloat(globalHeight) || 2.8,
+            color: '#94a3b8',
+            label: item.label
+          });
+        } else {
+          newDoors.push({
+            id: generateId(),
+            points,
+            width: currentPage.scale ? (getDistance(points[0], points[1]) / currentPage.scale.pixelDistance) * currentPage.scale.realDistance : 0.9,
+            label: item.label
+          });
+        }
+      });
+
+      updateCurrentPage({ 
+        walls: [...currentPage.walls, ...newWalls],
+        doors: [...currentPage.doors, ...newDoors]
+      });
+    } catch (error) {
+      console.error("AI Wall Detection Error:", error);
+      setErrorModal({
+        show: true,
+        title: 'AI 偵測失敗',
+        message: 'AI 偵測牆面與門失敗，請稍後再試。'
+      });
+    } finally {
+      setIsAiProcessing(false);
+    }
+  };
+
   const getTotals = () => {
     if (!currentPage) return null;
     const selectedItems = currentPage.measurements.filter(m => selectedIds.includes(m.id));
@@ -803,6 +1020,24 @@ export default function App() {
     updateCurrentPage(prevPage => {
       if (!prevPage.scale) return {};
       
+      const newWalls = prevPage.walls.map(w => {
+        if (w.id === measurementId) {
+          const newPoints = [...w.points];
+          newPoints[pointIndex] = point;
+          return { ...w, points: newPoints };
+        }
+        return w;
+      });
+
+      const newDoors = prevPage.doors.map(d => {
+        if (d.id === measurementId) {
+          const newPoints = [...d.points];
+          newPoints[pointIndex] = point;
+          return { ...d, points: newPoints };
+        }
+        return d;
+      });
+
       const newMeasurements = prevPage.measurements.map(m => {
         if (m.id === measurementId) {
           const newPoints = [...m.points];
@@ -847,7 +1082,7 @@ export default function App() {
         return m;
       });
       
-      return { measurements: newMeasurements };
+      return { measurements: newMeasurements, walls: newWalls, doors: newDoors };
     });
   }, [updateCurrentPage]);
 
@@ -859,8 +1094,15 @@ export default function App() {
 
     // 找到當前拖拽的測量對象並記錄其初始頂點
     const measurement = currentPage.measurements.find(m => m.id === measurementId);
+    const wall = currentPage.walls.find(w => w.id === measurementId);
+    const door = currentPage.doors.find(d => d.id === measurementId);
+    
     if (measurement) {
       dragStartPoints.current = [...measurement.points];
+    } else if (wall) {
+      dragStartPoints.current = [...wall.points];
+    } else if (door) {
+      dragStartPoints.current = [...door.points];
     }
   };
 
@@ -880,6 +1122,30 @@ export default function App() {
     e.target.y(0);
 
     updateCurrentPage(prevPage => {
+      const newWalls = prevPage.walls.map(w => {
+        if (w.id === measurementId) {
+          const startPoints = dragStartPoints.current!;
+          const newPoints = startPoints.map(p => ({
+            x: p.x + dx,
+            y: p.y + dy
+          }));
+          return { ...w, points: newPoints };
+        }
+        return w;
+      });
+
+      const newDoors = prevPage.doors.map(d => {
+        if (d.id === measurementId) {
+          const startPoints = dragStartPoints.current!;
+          const newPoints = startPoints.map(p => ({
+            x: p.x + dx,
+            y: p.y + dy
+          }));
+          return { ...d, points: newPoints };
+        }
+        return d;
+      });
+
       const newMeasurements = prevPage.measurements.map(m => {
         if (m.id === measurementId) {
           // 基於初始頂點座標加上總位移，確保絕對精確
@@ -911,7 +1177,7 @@ export default function App() {
         }
         return m;
       });
-      return { measurements: newMeasurements };
+      return { measurements: newMeasurements, walls: newWalls, doors: newDoors };
     });
   }, [updateCurrentPage]);
 
@@ -931,15 +1197,41 @@ export default function App() {
           <section>
             <div className="flex justify-between items-center mb-3">
               <h2 className="text-[11px] font-serif italic opacity-50 uppercase tracking-wider">圖面列表</h2>
-              <button 
-                onClick={() => fileInputRef.current?.click()}
-                className="p-1 hover:bg-[#141414] hover:text-[#E4E3E0] transition-all rounded-sm"
-                title="新增圖面"
-              >
-                <FilePlus size={16} />
-              </button>
+                <div className="flex gap-1">
+                  <button 
+                    onClick={() => {
+                      navigator.clipboard.read().then(items => {
+                        for (const item of items) {
+                          for (const type of item.types) {
+                            if (type.startsWith('image/')) {
+                              item.getType(type).then(blob => {
+                                const file = new File([blob], `剪貼簿圖片_${new Date().toLocaleTimeString()}.png`, { type });
+                                processFile(file);
+                              });
+                            }
+                          }
+                        }
+                      }).catch(err => {
+                        console.error('Clipboard error:', err);
+                        alert('無法讀取剪貼簿，請確保已授權權限或直接使用 Ctrl+V 貼上。');
+                      });
+                    }}
+                    className="p-1 hover:bg-[#141414] hover:text-[#E4E3E0] transition-all rounded-sm"
+                    title="從剪貼簿貼上"
+                  >
+                    <Clipboard size={16} />
+                  </button>
+                  <button 
+                    onClick={() => fileInputRef.current?.click()}
+                    className="p-1 hover:bg-[#141414] hover:text-[#E4E3E0] transition-all rounded-sm"
+                    title="新增圖面"
+                  >
+                    <FilePlus size={16} />
+                  </button>
+                </div>
             </div>
             <div className="space-y-1">
+              <p className="text-[9px] opacity-40 italic mb-2">提示：可直接 Ctrl+V 貼上圖片</p>
               {pages.length === 0 ? (
                 <p className="text-[10px] opacity-40 italic text-center py-2">尚未上傳圖面</p>
               ) : (
@@ -995,72 +1287,50 @@ export default function App() {
                 label="設定比例" 
                 disabled={!currentPage}
               />
-              <div className="relative group">
-                <ToolButton 
-                  active={tool === 'length'} 
-                  onClick={() => {
-                    setTool('length');
-                    setCurrentPoints([]);
-                    setIsDrawing(false);
-                  }} 
-                  icon={<Ruler size={18} />} 
-                  label="長度測量" 
-                  disabled={!currentPage?.scale}
-                />
-                {currentPage?.scale && (
-                  <input 
-                    type="color" 
-                    value={lengthColor} 
-                    onChange={(e) => setLengthColor(e.target.value)}
-                    className="absolute top-1 right-1 w-4 h-4 p-0 border-none bg-transparent cursor-pointer"
-                    title="設定預設長度顏色"
-                  />
-                )}
-              </div>
-              <div className="relative group">
-                <ToolButton 
-                  active={tool === 'area'} 
-                  onClick={() => {
-                    setTool('area');
-                    setCurrentPoints([]);
-                    setIsDrawing(false);
-                  }} 
-                  icon={<Square size={18} />} 
-                  label="面積測量" 
-                  disabled={!currentPage?.scale}
-                />
-                {currentPage?.scale && (
-                  <input 
-                    type="color" 
-                    value={areaColor} 
-                    onChange={(e) => setAreaColor(e.target.value)}
-                    className="absolute top-1 right-1 w-4 h-4 p-0 border-none bg-transparent cursor-pointer"
-                    title="設定預設面積顏色"
-                  />
-                )}
-              </div>
-              <div className="relative group">
-                <ToolButton 
-                  active={tool === 'rect'} 
-                  onClick={() => {
-                    setTool('rect');
-                    setCurrentPoints([]);
-                    setIsDrawing(false);
-                  }} 
-                  icon={<Square size={18} className="rotate-45" />} 
-                  label="矩形測量" 
-                  disabled={!currentPage?.scale}
-                />
-                {currentPage?.scale && (
-                  <input 
-                    type="color" 
-                    value={areaColor} 
-                    onChange={(e) => setAreaColor(e.target.value)}
-                    className="absolute top-1 right-1 w-4 h-4 p-0 border-none bg-transparent cursor-pointer"
-                    title="設定預設面積顏色"
-                  />
-                )}
-              </div>
+              <ToolButton 
+                active={tool === 'length'} 
+                onClick={() => {
+                  setTool('length');
+                  setCurrentPoints([]);
+                  setIsDrawing(false);
+                }} 
+                icon={<Ruler size={18} />} 
+                label="長度測量" 
+                disabled={!currentPage?.scale}
+              />
+              <ToolButton 
+                active={tool === 'area'} 
+                onClick={() => {
+                  setTool('area');
+                  setCurrentPoints([]);
+                  setIsDrawing(false);
+                }} 
+                icon={<Square size={18} />} 
+                label="面積測量" 
+                disabled={!currentPage?.scale}
+              />
+              <ToolButton 
+                active={tool === 'wall'} 
+                onClick={() => {
+                  setTool('wall');
+                  setCurrentPoints([]);
+                  setIsDrawing(false);
+                }} 
+                icon={<Edit3 size={18} />} 
+                label="繪製牆面" 
+                disabled={!currentPage?.scale}
+              />
+              <ToolButton 
+                active={tool === 'door'} 
+                onClick={() => {
+                  setTool('door');
+                  setCurrentPoints([]);
+                  setIsDrawing(false);
+                }} 
+                icon={<CheckCircle2 size={18} />} 
+                label="繪製門" 
+                disabled={!currentPage?.scale}
+              />
             </div>
           </section>
 
@@ -1127,54 +1397,41 @@ export default function App() {
                         </button>
                       )}
                     </div>
-                    <p className="text-[8px] text-blue-600/70 leading-tight">
-                      * 金鑰將儲存在您的瀏覽器中。若官方對話框無法運作，請使用此欄位。
-                    </p>
                   </div>
                 </motion.div>
               )}
             </AnimatePresence>
 
-            <div className="flex gap-2 mb-3">
-              <label className="flex items-center gap-1 text-[10px] cursor-pointer">
-                <input type="checkbox" checked={detectRoom} onChange={(e) => setDetectRoom(e.target.checked)} />
-                房間
-              </label>
-              <label className="flex items-center gap-1 text-[10px] cursor-pointer">
-                <input type="checkbox" checked={detectCorridor} onChange={(e) => setDetectCorridor(e.target.checked)} />
-                走廊
-              </label>
-            </div>
-            {!hasApiKey && !process.env.GEMINI_API_KEY && !customApiKey ? (
-              <button 
-                onClick={() => setShowApiKeyInput(true)}
-                className="w-full p-4 border border-dashed border-blue-500 bg-blue-50 text-blue-600 flex flex-col items-center justify-center gap-2 hover:bg-blue-100 transition-all"
-              >
-                <Settings size={18} />
-                <span className="text-[10px] uppercase tracking-widest font-bold">請先設定 API 金鑰</span>
-              </button>
-            ) : (
+            <div className="space-y-2">
+              <div className="flex gap-2 mb-3">
+                <label className="flex items-center gap-1 text-[10px] cursor-pointer">
+                  <input type="checkbox" checked={detectRoom} onChange={(e) => setDetectRoom(e.target.checked)} />
+                  房間
+                </label>
+                <label className="flex items-center gap-1 text-[10px] cursor-pointer">
+                  <input type="checkbox" checked={detectCorridor} onChange={(e) => setDetectCorridor(e.target.checked)} />
+                  走廊
+                </label>
+              </div>
+              
               <button 
                 onClick={detectRoomsWithAI}
                 disabled={!currentPage || isAiProcessing}
-                className={`w-full p-4 border border-[#141414] flex flex-col items-center justify-center gap-2 transition-all relative overflow-hidden ${isAiProcessing ? 'bg-gray-100 cursor-wait' : 'bg-white/40 hover:bg-white/80'}`}
+                className={`w-full p-3 border border-[#141414] flex items-center justify-center gap-2 transition-all relative overflow-hidden ${isAiProcessing ? 'bg-gray-100 cursor-wait' : 'bg-white/40 hover:bg-white/80'}`}
               >
-                {isAiProcessing && (
-                  <motion.div 
-                    className="absolute inset-0 bg-blue-500/10"
-                    animate={{ x: ['-100%', '100%'] }}
-                    transition={{ repeat: Infinity, duration: 1.5, ease: "linear" }}
-                  />
-                )}
-                <Sparkles size={18} className={isAiProcessing ? 'animate-pulse text-blue-500' : ''} />
-                <span className="text-[10px] uppercase tracking-widest font-bold">
-                  {isAiProcessing ? 'AI 偵測中...' : 'AI 自動偵測房間'}
-                </span>
+                <Sparkles size={16} />
+                <span className="text-[10px] uppercase tracking-widest font-bold">自動偵測房間面積</span>
               </button>
-            )}
-            <p className="text-[9px] opacity-40 mt-2 leading-tight">
-              * AI 將自動識別平面圖中的房間區域並建立面積測量。
-            </p>
+
+              <button 
+                onClick={detectWallsAndDoorsWithAI}
+                disabled={!currentPage || isAiProcessing}
+                className={`w-full p-3 border border-[#141414] flex items-center justify-center gap-2 transition-all relative overflow-hidden ${isAiProcessing ? 'bg-gray-100 cursor-wait' : 'bg-white/40 hover:bg-white/80'}`}
+              >
+                <Layers size={16} />
+                <span className="text-[10px] uppercase tracking-widest font-bold">自動偵測牆面與門</span>
+              </button>
+            </div>
           </section>
 
           {/* Scale Info */}
@@ -1307,7 +1564,7 @@ export default function App() {
                           message: '確定要刪除此圖面的所有測量紀錄嗎？',
                           type: 'danger',
                           onConfirm: () => {
-                            updateCurrentPage({ measurements: [] });
+                            updateCurrentPage({ measurements: [], walls: [], doors: [] });
                             setSelectedIds([]);
                           }
                         });
@@ -1324,7 +1581,7 @@ export default function App() {
                           message: '確定要清空此圖面的所有數據嗎？（包含比例尺）',
                           type: 'danger',
                           onConfirm: () => {
-                            updateCurrentPage({ measurements: [], scale: null });
+                            updateCurrentPage({ measurements: [], walls: [], doors: [], scale: null });
                             setSelectedIds([]);
                           }
                         });
@@ -1499,7 +1756,24 @@ export default function App() {
       </div>
 
       {/* Main Canvas Area */}
-      <div className="flex-1 relative bg-[#D1D0CC] overflow-hidden flex items-center justify-center">
+      <div className="flex-1 relative bg-[#D1D0CC] overflow-hidden flex flex-col">
+        {/* View Mode Toggle */}
+        <div className="absolute top-6 right-6 z-20 flex bg-white border border-[#141414] shadow-xl">
+          <button 
+            onClick={() => setViewMode('2d')}
+            className={`px-4 py-2 text-[10px] uppercase tracking-widest font-bold transition-all ${viewMode === '2d' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-gray-100'}`}
+          >
+            2D 編輯
+          </button>
+          <button 
+            onClick={() => setViewMode('3d')}
+            disabled={!currentPage}
+            className={`px-4 py-2 text-[10px] uppercase tracking-widest font-bold transition-all ${viewMode === '3d' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-gray-100 disabled:opacity-30'}`}
+          >
+            3D 預覽
+          </button>
+        </div>
+
         {!currentPage ? (
           <div className="text-center max-w-md p-8 border border-dashed border-[#141414]/30 rounded-lg">
             <div className="w-16 h-16 bg-[#141414]/5 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -1522,8 +1796,10 @@ export default function App() {
               </button>
             </div>
           </div>
+        ) : viewMode === '3d' ? (
+          <ThreeDViewer page={currentPage} />
         ) : (
-          <div className="w-full h-full cursor-crosshair">
+          <div className={`w-full h-full ${isSpacePressed || isMiddleMouseDown ? 'cursor-grab active:cursor-grabbing' : tool === 'select' ? 'cursor-default' : 'cursor-crosshair'}`}>
             <Stage
               width={window.innerWidth - 320}
               height={window.innerHeight}
@@ -1534,12 +1810,66 @@ export default function App() {
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
               onWheel={handleWheel}
+              onDragEnd={(e) => {
+                if (e.target === e.target.getStage()) {
+                  updateCurrentPage({
+                    stagePos: { x: e.target.x(), y: e.target.y() }
+                  });
+                }
+              }}
               ref={stageRef}
-              draggable={tool === 'select'}
+              draggable={tool === 'select' || isSpacePressed || isMiddleMouseDown}
             >
               <Layer>
                 {image && <KonvaImage image={image} />}
                 
+                {/* Walls */}
+                {currentPage.walls.map((w) => (
+                  <Group key={w.id} onClick={() => toggleSelection(w.id)}>
+                    <Line
+                      points={w.points.flatMap(p => [p.x, p.y])}
+                      stroke={selectedIds.includes(w.id) ? '#141414' : w.color}
+                      strokeWidth={10 / currentPage.stageScale}
+                      lineCap="round"
+                      opacity={0.6}
+                    />
+                    {w.points.map((p, i) => (
+                      <Circle 
+                        key={i} 
+                        x={p.x} 
+                        y={p.y} 
+                        radius={6 / currentPage.stageScale} 
+                        fill={selectedIds.includes(w.id) ? '#141414' : w.color}
+                        draggable={selectedIds.includes(w.id) && tool === 'select'}
+                        onDragMove={(e) => handlePointDragMove(w.id, i, e)}
+                      />
+                    ))}
+                  </Group>
+                ))}
+
+                {/* Doors */}
+                {currentPage.doors.map((d) => (
+                  <Group key={d.id} onClick={() => toggleSelection(d.id)}>
+                    <Line
+                      points={d.points.flatMap(p => [p.x, p.y])}
+                      stroke="#92400e"
+                      strokeWidth={6 / currentPage.stageScale}
+                      dash={[10, 5]}
+                    />
+                    {d.points.map((p, i) => (
+                      <Circle 
+                        key={i} 
+                        x={p.x} 
+                        y={p.y} 
+                        radius={6 / currentPage.stageScale} 
+                        fill="#92400e"
+                        draggable={selectedIds.includes(d.id) && tool === 'select'}
+                        onDragMove={(e) => handlePointDragMove(d.id, i, e)}
+                      />
+                    ))}
+                  </Group>
+                ))}
+
                 {/* Existing Measurements */}
                 {currentPage.measurements.map((m) => (
                   <Group 
@@ -1674,7 +2004,7 @@ export default function App() {
                 {/* Drawing Preview */}
                 {isDrawing && currentPoints.length > 0 && previewPoint && (
                   <Group>
-                    {tool === 'scale' ? (
+                    {tool === 'scale' || tool === 'wall' || tool === 'door' ? (
                       <>
                         <Line
                           points={[currentPoints[0].x, currentPoints[0].y, previewPoint.x, previewPoint.y]}
