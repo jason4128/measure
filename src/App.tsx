@@ -29,10 +29,14 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Text, Group } from 'react-konva';
 import useImage from 'use-image';
-import { Tool, Point, Measurement, Scale, ProjectPage, Wall, Door } from './types';
+import { Tool, Point, Measurement, Scale, ProjectPage, Wall, Door, CADPage, AppMode } from './types';
 import { GoogleGenAI, Type } from "@google/genai";
 import * as pdfjs from 'pdfjs-dist';
 import { ThreeDViewer } from './components/ThreeDViewer';
+import { CADSystem } from './components/CADSystem';
+import { db, auth } from './firebase';
+import { GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
+import { collection, doc, setDoc, getDocs, query, where, deleteDoc } from 'firebase/firestore';
 
 declare global {
   interface Window {
@@ -90,6 +94,10 @@ const M2_TO_PING = 0.3025;
 const generateId = () => `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
 export default function App() {
+  const [appMode, setAppMode] = useState<AppMode>('measure');
+  const [cadPages, setCadPages] = useState<CADPage[]>([]);
+  const [currentCadPageId, setCurrentCadPageId] = useState<string | null>(null);
+
   const [pages, setPages] = useState<ProjectPage[]>([]);
   const [currentPageId, setCurrentPageId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'2d' | '3d'>('2d');
@@ -130,6 +138,131 @@ export default function App() {
     message: string;
   }>({ show: false, title: '', message: '' });
 
+  const [user, setUser] = useState<User | null>(null);
+  const [showCloudProjects, setShowCloudProjects] = useState(false);
+  const [cloudProjects, setCloudProjects] = useState<any[]>([]);
+  const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const signIn = async () => {
+    try {
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(auth, provider);
+    } catch (error) {
+      console.error(error);
+      setErrorModal({ show: true, title: '登入失敗', message: '無法登入您的 Google 帳戶' });
+    }
+  };
+
+  const handleSignOut = () => {
+    signOut(auth);
+  };
+
+  const saveToCloud = async () => {
+    if (!user) {
+      setErrorModal({ show: true, title: '未登入', message: '請先登入以儲存專案至雲端' });
+      return;
+    }
+    
+    // Prompt for Project Name
+    const rawName = window.prompt("請輸入專案名稱:", "新專案");
+    if (!rawName) return;
+    const pName = rawName.trim();
+    if (!pName) return;
+
+    setIsSaving(true);
+    try {
+      const projectData = {
+        pages,
+        cadPages,
+        currentPageId,
+        currentCadPageId,
+        appMode,
+        version: '2.0'
+      };
+
+      const projectId = generateId();
+      await setDoc(doc(db, 'projects', projectId), {
+        userId: user.uid,
+        name: pName,
+        data: JSON.stringify(projectData),
+        updatedAt: new Date().toISOString() // Should be serverTimestamp in real setting but this is okay due to rules
+      });
+      alert('儲存成功！');
+    } catch (e: any) {
+      console.error(e);
+      let errMsg = String(e);
+      try {
+        const parsed = JSON.parse(e.message);
+        if (parsed.error) errMsg = parsed.error;
+      } catch (err) {}
+      setErrorModal({ show: true, title: '儲存失敗', message: errMsg });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const loadCloudProjects = async () => {
+    if (!user) return;
+    try {
+      const q = query(collection(db, 'projects'), where("userId", "==", user.uid));
+      const querySnapshot = await getDocs(q);
+      const projss: any[] = [];
+      querySnapshot.forEach((doc) => {
+         projss.push({ id: doc.id, ...doc.data() });
+      });
+      setCloudProjects(projss.sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)));
+      setShowCloudProjects(true);
+    } catch (e: any) {
+      console.error(e);
+      let errMsg = String(e);
+      try {
+        const parsed = JSON.parse(e.message);
+        if (parsed.error) errMsg = parsed.error;
+      } catch (err) {}
+      setErrorModal({ show: true, title: '載入失敗', message: errMsg });
+    }
+  };
+
+  const loadProjectFromData = (dataStr: string) => {
+    try {
+      const data = JSON.parse(dataStr);
+      if (data.version === '2.0') {
+        setPages(data.pages || []);
+        setCurrentPageId(data.currentPageId || null);
+        setCadPages(data.cadPages || []);
+        setCurrentCadPageId(data.currentCadPageId || null);
+        setAppMode(data.appMode || 'measure');
+      }
+      setSelectedIds([]);
+      setTool('select');
+      setShowCloudProjects(false);
+    } catch (err) {
+      setErrorModal({
+        show: true,
+        title: '讀取失敗',
+        message: '讀取專案檔案失敗，請確保資料格式正確。'
+      });
+    }
+  };
+
+  const deleteCloudProject = async (id: string) => {
+    if (!user) return;
+    if (!window.confirm("確定刪除此專案？")) return;
+    try {
+      await deleteDoc(doc(db, 'projects', id));
+      setCloudProjects(cloudProjects.filter(p => p.id !== id));
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   const updateCurrentPage = useCallback((updates: Partial<ProjectPage> | ((prev: ProjectPage) => Partial<ProjectPage>)) => {
     if (!currentPageId) return;
     setPages(prevPages => prevPages.map(p => {
@@ -143,6 +276,26 @@ export default function App() {
 
   const currentPage = pages.find(p => p.id === currentPageId);
   const [image] = useImage(currentPage?.imageSrc || '');
+
+  const currentCadPage = cadPages.find(p => p.id === currentCadPageId) || null;
+
+  const updateCurrentCadPage = useCallback((updates: Partial<CADPage>) => {
+    if (!currentCadPageId) return;
+    setCadPages(prevPages => prevPages.map(p => p.id === currentCadPageId ? { ...p, ...updates } : p));
+  }, [currentCadPageId]);
+
+  const addCadPage = () => {
+    const newPage: CADPage = {
+      id: generateId(),
+      name: `工程圖紙 ${cadPages.length + 1}`,
+      shapes: [],
+      stageScale: 1,
+      stagePos: { x: 0, y: 0 },
+      gridSize: 20
+    };
+    setCadPages([...cadPages, newPage]);
+    setCurrentCadPageId(newPage.id);
+  };
 
   const stageRef = useRef<any>(null);
   const dragStartPoints = useRef<Point[] | null>(null);
@@ -1184,17 +1337,32 @@ export default function App() {
   const totals = getTotals();
 
   return (
-    <div className="flex h-screen bg-[#E4E3E0] text-[#141414] font-sans overflow-hidden">
+    <div className="flex w-full h-screen bg-[#E4E3E0] text-[#141414] font-sans selection:bg-[#141414] selection:text-[#E4E3E0]">
       {/* Sidebar */}
-      <div className="w-80 border-r border-[#141414] flex flex-col bg-[#E4E3E0] z-10">
-        <div className="p-6 border-bottom border-[#141414]">
+      <div className="w-80 bg-white border-r border-[#141414] flex flex-col shadow-2xl relative z-10 shrink-0 h-full overflow-hidden">
+        <div className="p-6 border-b border-[#141414]">
           <h1 className="text-2xl font-serif italic mb-2">工程平面圖系統</h1>
-          <p className="text-xs opacity-60 uppercase tracking-widest">專業影像測量與標註</p>
+          <div className="flex gap-2">
+            <button 
+              onClick={() => setAppMode('measure')}
+              className={`flex-1 py-1 text-[10px] uppercase tracking-widest font-bold transition-all border border-[#141414] ${appMode === 'measure' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-gray-100'}`}
+            >
+              測量模式
+            </button>
+            <button 
+              onClick={() => setAppMode('cad')}
+              className={`flex-1 py-1 text-[10px] uppercase tracking-widest font-bold transition-all border border-[#141414] ${appMode === 'cad' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-gray-100'}`}
+            >
+              製圖模式
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-6">
-          {/* Pages Section */}
-          <section>
+          {appMode === 'measure' ? (
+            <>
+              {/* Pages Section */}
+              <section>
             <div className="flex justify-between items-center mb-3">
               <h2 className="text-[11px] font-serif italic opacity-50 uppercase tracking-wider">圖面列表</h2>
                 <div className="flex gap-1">
@@ -1475,7 +1643,14 @@ export default function App() {
 
           {/* Project Management */}
           <section>
-            <h2 className="text-[11px] font-serif italic opacity-50 uppercase tracking-wider mb-3">專案管理</h2>
+            <h2 className="text-[11px] font-serif italic flex justify-between items-center opacity-50 uppercase tracking-wider mb-3">
+              <span>專案管理</span>
+              {user ? (
+                <button onClick={handleSignOut} className="underline text-[#141414]">登出</button>
+              ) : (
+                <button onClick={signIn} className="underline text-blue-600 font-bold">登入雲端</button>
+              )}
+            </h2>
             <div className="grid grid-cols-2 gap-2">
               <button 
                 onClick={saveProject}
@@ -1492,6 +1667,24 @@ export default function App() {
                 <History size={16} />
                 <span className="text-[10px] uppercase tracking-widest font-bold">開啟專案</span>
               </button>
+              
+              <button 
+                onClick={saveToCloud}
+                disabled={isSaving || !user}
+                className="flex flex-col items-center justify-center gap-2 p-3 border border-blue-600 bg-blue-600/10 hover:bg-blue-600/20 text-blue-800 transition-all disabled:opacity-20 disabled:cursor-not-allowed"
+              >
+                <Download size={16} />
+                <span className="text-[10px] uppercase tracking-widest font-bold">儲存至雲端</span>
+              </button>
+              <button 
+                onClick={loadCloudProjects}
+                disabled={!user}
+                className="flex flex-col items-center justify-center gap-2 p-3 border border-blue-600 bg-blue-600/10 hover:bg-blue-600/20 text-blue-800 transition-all disabled:opacity-20 disabled:cursor-not-allowed"
+              >
+                <Layers size={16} />
+                <span className="text-[10px] uppercase tracking-widest font-bold">雲端列表</span>
+              </button>
+
               <input 
                 type="file" 
                 ref={projectInputRef} 
@@ -1741,6 +1934,39 @@ export default function App() {
               )}
             </div>
           </section>
+            </>
+          ) : (
+            <section>
+              <div className="flex justify-between items-center mb-3">
+                <h2 className="text-[11px] font-serif italic opacity-50 uppercase tracking-wider">製圖圖紙</h2>
+                <button 
+                  onClick={addCadPage}
+                  className="p-1 hover:bg-[#141414] hover:text-[#E4E3E0] transition-all rounded-sm"
+                  title="新增空白圖紙"
+                >
+                  <FilePlus size={16} />
+                </button>
+              </div>
+              <div className="space-y-1">
+                {cadPages.length === 0 ? (
+                  <p className="text-[10px] opacity-40 italic text-center py-2">尚未建立圖紙</p>
+                ) : (
+                  cadPages.map(p => (
+                    <div 
+                      key={p.id}
+                      className={`group flex items-center justify-between p-2 border transition-all cursor-pointer ${currentCadPageId === p.id ? 'bg-[#141414] text-[#E4E3E0] border-[#141414]' : 'border-transparent hover:border-[#141414]/20'}`}
+                      onClick={() => setCurrentCadPageId(p.id)}
+                    >
+                      <div className="flex items-center gap-2 overflow-hidden">
+                        <Square size={14} className="shrink-0 opacity-50" />
+                        <span className="text-[11px] truncate font-medium">{p.name}</span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+          )}
         </div>
 
         <div className="p-4 border-t border-[#141414]">
@@ -1755,26 +1981,29 @@ export default function App() {
         </div>
       </div>
 
-      {/* Main Canvas Area */}
-      <div className="flex-1 relative bg-[#D1D0CC] overflow-hidden flex flex-col">
-        {/* View Mode Toggle */}
-        <div className="absolute top-6 right-6 z-20 flex bg-white border border-[#141414] shadow-xl">
-          <button 
-            onClick={() => setViewMode('2d')}
-            className={`px-4 py-2 text-[10px] uppercase tracking-widest font-bold transition-all ${viewMode === '2d' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-gray-100'}`}
-          >
-            2D 編輯
-          </button>
-          <button 
-            onClick={() => setViewMode('3d')}
-            disabled={!currentPage}
-            className={`px-4 py-2 text-[10px] uppercase tracking-widest font-bold transition-all ${viewMode === '3d' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-gray-100 disabled:opacity-30'}`}
-          >
-            3D 預覽
-          </button>
-        </div>
+      {/* Main Area */}
+      {appMode === 'cad' ? (
+        <CADSystem page={currentCadPage} updatePage={updateCurrentCadPage} />
+      ) : (
+        <div className="flex-1 relative bg-[#D1D0CC] overflow-hidden flex flex-col">
+          {/* View Mode Toggle */}
+          <div className="absolute top-6 right-6 z-20 flex bg-white border border-[#141414] shadow-xl">
+            <button 
+              onClick={() => setViewMode('2d')}
+              className={`px-4 py-2 text-[10px] uppercase tracking-widest font-bold transition-all ${viewMode === '2d' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-gray-100'}`}
+            >
+              2D 編輯
+            </button>
+            <button 
+              onClick={() => setViewMode('3d')}
+              disabled={!currentPage}
+              className={`px-4 py-2 text-[10px] uppercase tracking-widest font-bold transition-all ${viewMode === '3d' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-gray-100 disabled:opacity-30'}`}
+            >
+              3D 預覽
+            </button>
+          </div>
 
-        {!currentPage ? (
+          {!currentPage ? (
           <div className="text-center max-w-md p-8 border border-dashed border-[#141414]/30 rounded-lg">
             <div className="w-16 h-16 bg-[#141414]/5 rounded-full flex items-center justify-center mx-auto mb-4">
               <Upload size={32} className="opacity-20" />
@@ -2116,6 +2345,7 @@ export default function App() {
           </div>
         )}
       </div>
+      )}
 
       {/* Scale Input Modal */}
       <AnimatePresence>
@@ -2241,6 +2471,83 @@ export default function App() {
                     設定比例
                   </button>
                 </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Cloud Projects Modal */}
+        {showCloudProjects && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#141414]/40 backdrop-blur-sm p-4">
+            <motion.div
+              initial={{ scale: 0.95 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0.95 }}
+              className="bg-[#E4E3E0] border border-[#141414] w-full max-w-md shadow-2xl flex flex-col max-h-[80vh] relative"
+            >
+              <button 
+                onClick={() => setShowCloudProjects(false)}
+                className="absolute top-4 right-4 text-[#141414] hover:opacity-50"
+              >
+                <X size={20} />
+              </button>
+              <div className="p-6 border-b border-[#141414]/10">
+                <h3 className="text-xl font-serif italic text-black">雲端專案</h3>
+              </div>
+              <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-3">
+                {cloudProjects.length === 0 ? (
+                  <div className="text-center py-8 text-[#141414]/50">尚無儲存的專案</div>
+                ) : (
+                  cloudProjects.map(p => (
+                    <div key={p.id} className="flex flex-col gap-2 p-4 bg-white/50 border border-[#141414]/10 hover:border-blue-500 transition-colors">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-[#141414] font-medium truncate pr-4 text-base">{p.name || '未命名專案'}</h3>
+                        <span className="text-xs text-[#141414]/50 shrink-0">{new Date(p.updatedAt).toLocaleDateString()}</span>
+                      </div>
+                      <div className="flex items-center justify-between mt-2">
+                        <button
+                          onClick={() => loadProjectFromData(p.data)}
+                          className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold uppercase tracking-widest transition-colors"
+                        >
+                          開啟
+                        </button>
+                        <button
+                          onClick={() => deleteCloudProject(p.id)}
+                          className="px-3 py-1.5 text-red-600 hover:bg-red-50 flex items-center gap-1 text-xs transition-colors"
+                        >
+                          <Trash2 size={14} /> 刪除
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Error Modal */}
+        {errorModal.show && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#141414]/40 backdrop-blur-sm p-4">
+            <motion.div
+              initial={{ scale: 0.9 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0.9 }}
+              className="bg-[#E4E3E0] border border-red-600 w-full max-w-sm shadow-2xl flex flex-col relative"
+            >
+              <div className="p-6 border-b border-red-600/10">
+                <h3 className="text-xl font-serif italic text-red-600">{errorModal.title}</h3>
+              </div>
+              <div className="p-6 text-[#141414]">
+                <p>{errorModal.message}</p>
+              </div>
+              <div className="p-4 flex justify-end">
+                <button
+                  onClick={() => setErrorModal({ show: false, title: '', message: '' })}
+                  className="px-6 py-2 bg-red-600 text-white font-bold text-xs uppercase tracking-widest hover:bg-red-500 transition-colors"
+                >
+                  關閉
+                </button>
               </div>
             </motion.div>
           </div>

@@ -1,0 +1,34 @@
+{
+  "entities": {
+    "Project": {
+      "title": "Project",
+      "description": "A saved CAD or Measurement project",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner of the project"
+        },
+        "name": {
+          "type": "string",
+          "description": "Project name"
+        },
+        "data": {
+          "type": "string",
+          "description": "JSON stringified project data"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "name", "data", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "projects/{projectId}": {
+      "schema": "Project",
+      "description": "Projects belonging to users"
+    }
+  }
+}

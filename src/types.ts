@@ -54,8 +54,46 @@ export interface ProjectPage {
 
 export type Tool = 'select' | 'scale' | 'length' | 'area' | 'rect' | 'wall' | 'door';
 
+export type AppMode = 'measure' | 'cad';
+
+export interface CADLayer {
+  id: string;
+  name: string;
+  visible: boolean;
+  locked: boolean;
+}
+
+export interface CADShape {
+  id: string;
+  type: 'line' | 'rect' | 'circle' | 'text' | 'door_swing' | 'door_sliding' | 'window' | 'dimension';
+  points: Point[]; // For line: [start, end]. For rect: [topLeft, bottomRight]. For circle: [center, radiusPoint]
+  color: string;
+  strokeWidth: number;
+  text?: string;
+  value?: number;
+  unit?: string;
+  flipX?: boolean;
+  flipY?: boolean;
+  layerId?: string;
+}
+
+export interface CADPage {
+  id: string;
+  name: string;
+  shapes: CADShape[];
+  stageScale: number;
+  stagePos: Point;
+  gridSize: number;
+  scale?: Scale | null;
+  layers?: CADLayer[];
+  activeLayerId?: string;
+}
+
 export interface AppState {
+  appMode: AppMode;
   pages: ProjectPage[];
+  cadPages: CADPage[];
   currentPageId: string | null;
+  currentCadPageId: string | null;
   viewMode: '2d' | '3d';
 }
