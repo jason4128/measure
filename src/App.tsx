@@ -36,8 +36,8 @@ import * as pdfjs from 'pdfjs-dist';
 import { ThreeDViewer } from './components/ThreeDViewer';
 import { CADSystem } from './components/CADSystem';
 import { db, auth } from './firebase';
-import { GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
-import { collection, doc, setDoc, getDocs, query, where, deleteDoc } from 'firebase/firestore';
+import { GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, User, signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
+import { collection, doc, setDoc, getDocs, query, where, deleteDoc, serverTimestamp } from 'firebase/firestore';
 
 declare global {
   interface Window {
@@ -144,6 +144,10 @@ export default function App() {
   const [showCloudProjects, setShowCloudProjects] = useState(false);
   const [cloudProjects, setCloudProjects] = useState<any[]>([]);
   const [isSaving, setIsSaving] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [isRegistering, setIsRegistering] = useState(false);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -152,18 +156,90 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  const signIn = async () => {
+  const handleGoogleSignIn = async () => {
     try {
       const provider = new GoogleAuthProvider();
       await signInWithPopup(auth, provider);
+      setShowAuthModal(false);
     } catch (error) {
       console.error(error);
-      setErrorModal({ show: true, title: '登入失敗', message: '無法登入您的 Google 帳戶' });
+      setErrorModal({ show: true, title: 'Google登入失敗', message: '無法登入您的 Google 帳戶' });
+    }
+  };
+
+  const handleEmailAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      if (isRegistering) {
+        await createUserWithEmailAndPassword(auth, authEmail, authPassword);
+      } else {
+        await signInWithEmailAndPassword(auth, authEmail, authPassword);
+      }
+      setShowAuthModal(false);
+      setAuthEmail('');
+      setAuthPassword('');
+    } catch (error: any) {
+      console.error(error);
+      let msg = error.message;
+      if (error.code === 'auth/email-already-in-use') msg = '電子郵件已被使用';
+      if (error.code === 'auth/invalid-email') msg = '無效的電子郵件';
+      if (error.code === 'auth/operation-not-allowed') msg = '尚未在 Firebase Console 中啟用電子郵件登入。請至 Firebase Console -> Authentication -> Sign-in method 啟用 Email/Password。';
+      if (error.code === 'auth/weak-password') msg = '密碼過於簡單';
+      if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password' || error.code === 'auth/invalid-credential') msg = '電子郵件或密碼錯誤';
+      
+      setErrorModal({ show: true, title: isRegistering ? '註冊失敗' : '登入失敗', message: msg });
     }
   };
 
   const handleSignOut = () => {
     signOut(auth);
+  };
+
+  enum OperationType {
+    CREATE = 'create',
+    UPDATE = 'update',
+    DELETE = 'delete',
+    LIST = 'list',
+    GET = 'get',
+    WRITE = 'write',
+  }
+
+  interface FirestoreErrorInfo {
+    error: string;
+    operationType: OperationType;
+    path: string | null;
+    authInfo: {
+      userId?: string | null;
+      email?: string | null;
+      emailVerified?: boolean | null;
+      isAnonymous?: boolean | null;
+      tenantId?: string | null;
+      providerInfo?: {
+        providerId?: string | null;
+        email?: string | null;
+      }[];
+    }
+  }
+
+  const handleFirestoreError = (error: unknown, operationType: OperationType, path: string | null) => {
+    const errInfo: FirestoreErrorInfo = {
+      error: error instanceof Error ? error.message : String(error),
+      authInfo: {
+        userId: auth.currentUser?.uid,
+        email: auth.currentUser?.email,
+        emailVerified: auth.currentUser?.emailVerified,
+        isAnonymous: auth.currentUser?.isAnonymous,
+        tenantId: auth.currentUser?.tenantId,
+        providerInfo: auth.currentUser?.providerData?.map(provider => ({
+          providerId: provider.providerId,
+          email: provider.email,
+        })) || []
+      },
+      operationType,
+      path
+    };
+    console.error('Firestore Error: ', JSON.stringify(errInfo));
+    throw new Error(JSON.stringify(errInfo));
   };
 
   const saveToCloud = async () => {
@@ -194,17 +270,20 @@ export default function App() {
         userId: user.uid,
         name: pName,
         data: JSON.stringify(projectData),
-        updatedAt: new Date().toISOString() // Should be serverTimestamp in real setting but this is okay due to rules
+        updatedAt: serverTimestamp()
       });
       alert('儲存成功！');
     } catch (e: any) {
-      console.error(e);
-      let errMsg = String(e);
       try {
-        const parsed = JSON.parse(e.message);
-        if (parsed.error) errMsg = parsed.error;
-      } catch (err) {}
-      setErrorModal({ show: true, title: '儲存失敗', message: errMsg });
+        handleFirestoreError(e, OperationType.CREATE, 'projects');
+      } catch (err: any) {
+        let errMsg = String(err);
+        try {
+          const parsed = JSON.parse(err.message);
+          if (parsed.error) errMsg = parsed.error;
+        } catch (e2) {}
+        setErrorModal({ show: true, title: '儲存失敗', message: errMsg });
+      }
     } finally {
       setIsSaving(false);
     }
@@ -219,16 +298,23 @@ export default function App() {
       querySnapshot.forEach((doc) => {
          projss.push({ id: doc.id, ...doc.data() });
       });
-      setCloudProjects(projss.sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)));
+      setCloudProjects(projss.sort((a,b) => {
+        const timeA = a.updatedAt?.toMillis ? a.updatedAt.toMillis() : 0;
+        const timeB = b.updatedAt?.toMillis ? b.updatedAt.toMillis() : 0;
+        return timeB - timeA;
+      }));
       setShowCloudProjects(true);
     } catch (e: any) {
-      console.error(e);
-      let errMsg = String(e);
       try {
-        const parsed = JSON.parse(e.message);
-        if (parsed.error) errMsg = parsed.error;
-      } catch (err) {}
-      setErrorModal({ show: true, title: '載入失敗', message: errMsg });
+        handleFirestoreError(e, OperationType.GET, 'projects');
+      } catch (err: any) {
+        let errMsg = String(err);
+        try {
+          const parsed = JSON.parse(err.message);
+          if (parsed.error) errMsg = parsed.error;
+        } catch (e2) {}
+        setErrorModal({ show: true, title: '載入失敗', message: errMsg });
+      }
     }
   };
 
@@ -261,7 +347,16 @@ export default function App() {
       await deleteDoc(doc(db, 'projects', id));
       setCloudProjects(cloudProjects.filter(p => p.id !== id));
     } catch (e) {
-      console.error(e);
+      try {
+        handleFirestoreError(e, OperationType.DELETE, 'projects');
+      } catch (err: any) {
+        let errMsg = String(err);
+        try {
+          const parsed = JSON.parse(err.message);
+          if (parsed.error) errMsg = parsed.error;
+        } catch (e2) {}
+        setErrorModal({ show: true, title: '刪除失敗', message: errMsg });
+      }
     }
   };
 
@@ -510,7 +605,20 @@ export default function App() {
     }
     if (!currentPage) return;
     const stage = e.target.getStage();
-    const point = stage.getRelativePointerPosition();
+    let point = stage.getRelativePointerPosition();
+
+    if (e.evt.shiftKey && isDrawing && currentPoints.length > 0) {
+      const lastPoint = currentPoints[currentPoints.length - 1];
+      const dx = point.x - lastPoint.x;
+      const dy = point.y - lastPoint.y;
+      const angle = Math.atan2(dy, dx);
+      const snappedAngle = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      point = {
+        x: lastPoint.x + Math.cos(snappedAngle) * dist,
+        y: lastPoint.y + Math.sin(snappedAngle) * dist
+      };
+    }
 
     if (tool === 'select') {
       if (e.target === stage) {
@@ -662,7 +770,21 @@ export default function App() {
 
   const handleMouseMove = (e: any) => {
     const stage = e.target.getStage();
-    const point = stage.getRelativePointerPosition();
+    let point = stage.getRelativePointerPosition();
+
+    if (e.evt.shiftKey && isDrawing && currentPoints.length > 0) {
+      const lastPoint = currentPoints[currentPoints.length - 1];
+      const dx = point.x - lastPoint.x;
+      const dy = point.y - lastPoint.y;
+      const angle = Math.atan2(dy, dx);
+      const snappedAngle = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      point = {
+        x: lastPoint.x + Math.cos(snappedAngle) * dist,
+        y: lastPoint.y + Math.sin(snappedAngle) * dist
+      };
+    }
+
     setPreviewPoint(point);
 
     if (selectionBox) {
@@ -1816,7 +1938,7 @@ export default function App() {
               {user ? (
                 <button onClick={handleSignOut} className="underline text-[#141414]">登出</button>
               ) : (
-                <button onClick={signIn} className="underline text-blue-600 font-bold">登入雲端</button>
+                <button onClick={() => setShowAuthModal(true)} className="underline text-blue-600 font-bold">登入雲端</button>
               )}
             </h2>
             <div className="grid grid-cols-2 gap-2">
@@ -2667,6 +2789,72 @@ export default function App() {
                     設定比例
                   </button>
                 </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Auth Modal */}
+        {showAuthModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#141414]/40 backdrop-blur-sm p-4">
+            <motion.div
+              initial={{ scale: 0.95 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0.95 }}
+              className="bg-[#E4E3E0] p-6 max-w-sm w-full border border-[#141414] shadow-[8px_8px_0px_0px_rgba(20,20,20,1)] relative"
+            >
+              <button 
+                onClick={() => setShowAuthModal(false)}
+                className="absolute top-4 right-4 text-[#141414] hover:opacity-50 transition-opacity"
+              >
+                <X size={20} />
+              </button>
+              
+              <h2 className="text-xl font-bold mb-4">{isRegistering ? '註冊帳號' : '登入雲端'}</h2>
+              
+              <form onSubmit={handleEmailAuthSubmit} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold mb-1">電子郵件</label>
+                  <input
+                    type="email"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    required
+                    className="w-full bg-transparent border-b-2 border-[#141414] focus:outline-none focus:border-blue-600 px-0 py-2 text-sm transition-colors"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold mb-1">密碼</label>
+                  <input
+                    type="password"
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    required
+                    className="w-full bg-transparent border-b-2 border-[#141414] focus:outline-none focus:border-blue-600 px-0 py-2 text-sm transition-colors"
+                  />
+                </div>
+                
+                <button
+                  type="submit"
+                  className="w-full bg-[#141414] text-[#E4E3E0] py-3 text-sm font-bold tracking-widest hover:bg-black transition-colors"
+                >
+                  {isRegistering ? '註冊' : '登入'}
+                </button>
+              </form>
+
+              <div className="mt-4 flex items-center justify-between text-xs text-gray-500">
+                <button onClick={() => setIsRegistering(!isRegistering)} className="hover:underline">
+                  {isRegistering ? '已有帳號？點此登入' : '還沒有帳號？點此註冊'}
+                </button>
+              </div>
+              
+              <div className="mt-4 pt-4 border-t border-[#141414]/20">
+                <button 
+                  onClick={handleGoogleSignIn}
+                  className="w-full bg-white border border-[#141414] text-[#141414] py-3 text-sm font-bold tracking-widest hover:bg-gray-50 transition-colors flex items-center justify-center gap-2"
+                >
+                  使用 Google 繼續
+                </button>
               </div>
             </motion.div>
           </div>
