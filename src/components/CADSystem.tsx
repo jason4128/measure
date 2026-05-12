@@ -723,12 +723,12 @@ export const CADSystem: React.FC<CADSystemProps> = ({ page, updatePage }) => {
                 onMouseLeave: (e: any) => { if (tool === 'select') e.target.getStage().container().style.cursor = 'default'; }
               };
 
-              if (shape.type === 'line' && shape.points.length === 2) {
+              if (shape.type === 'line') {
                 return (
                   <Line 
                     key={shape.id}
                     {...commonProps}
-                    points={[shape.points[0].x, shape.points[0].y, shape.points[1].x, shape.points[1].y]}
+                    points={shape.points.flatMap(p => [p.x, p.y])}
                   />
                 );
               }

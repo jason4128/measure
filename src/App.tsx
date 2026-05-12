@@ -24,12 +24,13 @@ import {
   Sparkles,
   Layers,
   FilePlus,
-  Clipboard
+  Clipboard,
+  Pencil
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Stage, Layer, Image as KonvaImage, Line, Circle, Text, Group } from 'react-konva';
+import { Stage, Layer, Image as KonvaImage, Line, Circle, Text, Group, Rect } from 'react-konva';
 import useImage from 'use-image';
-import { Tool, Point, Measurement, Scale, ProjectPage, Wall, Door, CADPage, AppMode } from './types';
+import { Tool, Point, Measurement, Scale, ProjectPage, Wall, Door, CADPage, CADShape, AppMode } from './types';
 import { GoogleGenAI, Type } from "@google/genai";
 import * as pdfjs from 'pdfjs-dist';
 import { ThreeDViewer } from './components/ThreeDViewer';
@@ -109,6 +110,7 @@ export default function App() {
   const [tempPixelDist, setTempPixelDist] = useState(0);
   const [scaleInput, setScaleInput] = useState({ value: '', unit: 'm' });
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [selectionBox, setSelectionBox] = useState<{start: Point, current: Point} | null>(null);
   const [detectRoom, setDetectRoom] = useState(true);
   const [detectCorridor, setDetectCorridor] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -512,6 +514,7 @@ export default function App() {
 
     if (tool === 'select') {
       if (e.target === stage) {
+        setSelectionBox({ start: point, current: point });
         setSelectedIds([]);
       }
       return;
@@ -661,6 +664,71 @@ export default function App() {
     const stage = e.target.getStage();
     const point = stage.getRelativePointerPosition();
     setPreviewPoint(point);
+
+    if (selectionBox) {
+      setSelectionBox({ ...selectionBox, current: point });
+    }
+  };
+
+  const handleStageMouseUp = (e: any) => {
+    if (isMiddleMouseDown) {
+      setIsMiddleMouseDown(false);
+    }
+    
+    if (selectionBox) {
+        let minX = Math.min(selectionBox.start.x, selectionBox.current.x);
+        let maxX = Math.max(selectionBox.start.x, selectionBox.current.x);
+        let minY = Math.min(selectionBox.start.y, selectionBox.current.y);
+        let maxY = Math.max(selectionBox.start.y, selectionBox.current.y);
+
+        const toSelectM = currentPage?.measurements.filter(m => {
+            let shapeMinX = Infinity;
+            let shapeMaxX = -Infinity;
+            let shapeMinY = Infinity;
+            let shapeMaxY = -Infinity;
+            
+            m.points.forEach(p => {
+                shapeMinX = Math.min(shapeMinX, p.x);
+                shapeMaxX = Math.max(shapeMaxX, p.x);
+                shapeMinY = Math.min(shapeMinY, p.y);
+                shapeMaxY = Math.max(shapeMaxY, p.y);
+            });
+            return shapeMinX >= minX && shapeMaxX <= maxX && shapeMinY >= minY && shapeMaxY <= maxY;
+        }).map(m => m.id) || [];
+
+        const toSelectW = currentPage?.walls.filter(w => {
+            let shapeMinX = Infinity;
+            let shapeMaxX = -Infinity;
+            let shapeMinY = Infinity;
+            let shapeMaxY = -Infinity;
+            
+            w.points.forEach(p => {
+                shapeMinX = Math.min(shapeMinX, p.x);
+                shapeMaxX = Math.max(shapeMaxX, p.x);
+                shapeMinY = Math.min(shapeMinY, p.y);
+                shapeMaxY = Math.max(shapeMaxY, p.y);
+            });
+            return shapeMinX >= minX && shapeMaxX <= maxX && shapeMinY >= minY && shapeMaxY <= maxY;
+        }).map(w => w.id) || [];
+
+        const toSelectD = currentPage?.doors.filter(d => {
+            let shapeMinX = Infinity;
+            let shapeMaxX = -Infinity;
+            let shapeMinY = Infinity;
+            let shapeMaxY = -Infinity;
+            
+            d.points.forEach(p => {
+                shapeMinX = Math.min(shapeMinX, p.x);
+                shapeMaxX = Math.max(shapeMaxX, p.x);
+                shapeMinY = Math.min(shapeMinY, p.y);
+                shapeMaxY = Math.max(shapeMaxY, p.y);
+            });
+            return shapeMinX >= minX && shapeMaxX <= maxX && shapeMinY >= minY && shapeMaxY <= maxY;
+        }).map(d => d.id) || [];
+
+        setSelectedIds([...toSelectM, ...toSelectW, ...toSelectD]);
+        setSelectionBox(null);
+    }
   };
 
   const handleWheel = (e: any) => {
@@ -1641,6 +1709,106 @@ export default function App() {
             </button>
           </section>
 
+          {/* Transfer to CAD */}
+          <section>
+            <button 
+              onClick={() => {
+                if (!currentPage) return;
+                const layerId = generateId();
+                const shapes: CADShape[] = [];
+                
+                currentPage.walls.forEach(w => {
+                  shapes.push({
+                    id: generateId(),
+                    type: 'line',
+                    points: [...w.points],
+                    color: w.color,
+                    strokeWidth: 4,
+                    layerId
+                  });
+                });
+
+                currentPage.doors.forEach(d => {
+                  if (d.points.length !== 2) return;
+                  shapes.push({
+                    id: generateId(),
+                    type: 'door_swing',
+                    points: [...d.points],
+                    color: '#8b5cf6',
+                    strokeWidth: 2,
+                    flipX: false,
+                    flipY: false,
+                    layerId
+                  });
+                });
+                
+                currentPage.measurements.forEach(m => {
+                  if (m.type === 'length') {
+                    // For dimension, just use a line and text in CAD
+                    shapes.push({
+                      id: generateId(),
+                      type: 'line',
+                      points: [...m.points],
+                      color: m.color,
+                      strokeWidth: 2,
+                      layerId
+                    });
+                    const midIndex = Math.floor((m.points.length - 1) / 2);
+                    shapes.push({
+                      id: generateId(),
+                      type: 'text',
+                      points: [{ x: (m.points[midIndex].x + m.points[midIndex+1].x) / 2, y: (m.points[midIndex].y + m.points[midIndex+1].y) / 2 }],
+                      color: m.color,
+                      strokeWidth: 1,
+                      text: `${m.value.toFixed(2)} ${m.unit}`,
+                      layerId
+                    });
+                  } else if (m.type === 'area' || m.type === 'rect') {
+                    shapes.push({
+                      id: generateId(),
+                      type: 'line',
+                      points: [...m.points, m.points[0]], // Closed shape
+                      color: m.color,
+                      strokeWidth: 2,
+                      layerId
+                    });
+                    shapes.push({
+                      id: generateId(),
+                      type: 'text',
+                      points: [{ x: m.points[0].x, y: m.points[0].y - 20 }],
+                      color: m.color,
+                      strokeWidth: 1,
+                      text: `${m.label}: ${m.value.toFixed(2)} ${m.unit}`,
+                      layerId
+                    });
+                  }
+                });
+
+                const cadPageId = generateId();
+                setCadPages(prev => [...prev, {
+                  id: cadPageId,
+                  name: currentPage.name + " (CAD)",
+                  shapes,
+                  stageScale: currentPage.stageScale,
+                  stagePos: currentPage.stagePos,
+                  layers: [
+                    { id: 'default-layer', name: '預設圖層', visible: true, locked: false },
+                    { id: layerId, name: '從測量匯入', visible: true, locked: false }
+                  ],
+                  activeLayerId: 'default-layer',
+                  gridSize: 50
+                }]);
+                setCurrentCadPageId(cadPageId);
+                setAppMode('cad');
+              }}
+              disabled={!currentPage}
+              className="w-full p-3 border border-[#8b5cf6] bg-[#8b5cf6]/10 hover:bg-[#8b5cf6]/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed mb-3"
+            >
+              <Pencil size={16} className="text-[#8b5cf6]" />
+              <span className="text-[10px] uppercase tracking-widest font-bold text-[#8b5cf6]">轉至製圖模式</span>
+            </button>
+          </section>
+
           {/* Project Management */}
           <section>
             <h2 className="text-[11px] font-serif italic flex justify-between items-center opacity-50 uppercase tracking-wider mb-3">
@@ -2038,6 +2206,7 @@ export default function App() {
               y={currentPage.stagePos.y}
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
+              onMouseUp={handleStageMouseUp}
               onWheel={handleWheel}
               onDragEnd={(e) => {
                 if (e.target === e.target.getStage()) {
@@ -2274,6 +2443,33 @@ export default function App() {
                       </>
                     ) : null}
                   </Group>
+                )}
+                
+                {/* Selection Box */}
+                {selectionBox && (
+                  <Rect
+                    x={Math.min(selectionBox.start.x, selectionBox.current.x)}
+                    y={Math.min(selectionBox.start.y, selectionBox.current.y)}
+                    width={Math.abs(selectionBox.current.x - selectionBox.start.x)}
+                    height={Math.abs(selectionBox.current.y - selectionBox.start.y)}
+                    fill="rgba(0, 0, 0, 0.1)"
+                    stroke="rgba(0, 0, 0, 0.4)"
+                    strokeWidth={1 / currentPage.stageScale}
+                    listening={false}
+                  />
+                )}
+                
+                {/* Real-time distance for length measurement */}
+                {isDrawing && tool === 'length' && currentPoints.length > 0 && previewPoint && currentPage.scale && (
+                  <Text
+                    x={(currentPoints[currentPoints.length - 1].x + previewPoint.x) / 2}
+                    y={(currentPoints[currentPoints.length - 1].y + previewPoint.y) / 2 - 20 / currentPage.stageScale}
+                    text={`${((getDistance(currentPoints[currentPoints.length - 1], previewPoint) / currentPage.scale.pixelDistance) * currentPage.scale.realDistance).toFixed(2)} ${currentPage.scale.unit}`}
+                    fontSize={14 / currentPage.stageScale}
+                    fontFamily="monospace"
+                    fill="#ef4444"
+                    align="center"
+                  />
                 )}
               </Layer>
             </Stage>
